@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Route Visualization Results</title>
+    
+    <!-- Mapbox GL JS -->
+    <script src='https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.js'></script>
+    <link href='https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css' rel='stylesheet' />
+    
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/route-visualization.css') }}">
+    <script>
+        // 서버에서 전달받은 Mapbox 토큰을 전역 변수로 설정
+        window.MAPBOX_ACCESS_TOKEN = "{{ mapbox_token }}";
+    </script>
+    
+    <style>
+        html, body { height: 100%; }
+        *, *::before, *::after { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            padding: 12px;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f5f5f5;
+            height: 100dvh; /* 모바일 주소창 등 환경 고려 */
+            display: flex;
+            flex-direction: column;
+            overflow: hidden; /* 불필요한 스크롤 제거 */
+        }
+        
+        .header {
+            text-align: left;
+            margin-bottom: 12px;
+            background: white;
+            padding: 12px 16px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        
+        .header h1 {
+            margin: 0 0 6px 0;
+            color: #333;
+            font-size: 18px;
+        }
+        
+        .header .subtitle {
+            color: #666;
+            font-size: 12px;
+        }
+        
+        .controls {
+            display: flex;
+            justify-content: flex-start;
+            gap: 8px;
+            margin-bottom: 10px;
+        }
+
+        .header-left {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .btn {
+            padding: 6px 10px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: background-color 0.3s;
+        }
+        
+        .btn-primary {
+            background-color: #007bff;
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            background-color: #0056b3;
+        }
+        
+        .btn-secondary {
+            background-color: #6c757d;
+            color: white;
+        }
+        
+        .btn-secondary:hover {
+            background-color: #545b62;
+        }
+        
+        .map-container {
+            width: 100%;
+            flex: 1;
+            min-height: 0; /* flex 컨테이너에서 자식이 영역을 넘지 않도록 */
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            overflow: hidden;
+            position: relative;
+        }
+        
+        .route-info {
+            background: white;
+            margin-top: 20px;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .route-info h3 {
+            margin: 0 0 15px 0;
+            color: #333;
+        }
+        
+        .route-stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }
+        
+        .stat-item {
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 4px;
+            text-align: center;
+        }
+        
+        .stat-label {
+            font-size: 12px;
+            color: #666;
+            text-transform: uppercase;
+        }
+        
+        .stat-value {
+            font-size: 18px;
+            font-weight: bold;
+            color: #333;
+            margin-top: 5px;
+        }
+        
+        @media print {
+            body {
+                background: white;
+                padding: 10px;
+                height: auto;
+                overflow: visible;
+            }
+            
+            .controls {
+                display: none;
+            }
+            .header-actions {
+                display: none;
+            }
+            
+            .map-container {
+                height: 400px;
+                break-inside: avoid;
+            }
+        }
+
+        /* Full view 전용: Route Information 오버레이를 우측 하단으로 이동 */
+        #route-info-overlay {
+            position: absolute;
+            top: auto !important;
+            bottom: 16px;
+            right: 16px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="header-left">
+            <h1>Route Visualization Results</h1>
+            <div class="subtitle">Generated on {{ current_time or 'N/A' }}</div>
+        </div>
+        <div class="header-actions">
+            <button class="btn btn-secondary" onclick="saveAsHtml()">Save as HTML</button>
+            <button class="btn btn-secondary" onclick="window.close()">Close</button>
+        </div>
+    </div>
+    
+    <div class="map-container">
+    <div id="route-map" style="position: absolute; inset: 0; width: 100%; height: 100%;"></div>
+        
+        <!-- 팝업과 동일한 오버레이 정보 패널 (맵 컨테이너 내부로 이동) -->
+        <div id="route-info-overlay" class="route-info-overlay">
+            <div class="route-info-header">
+                <h4>Route Information</h4>
+                <button type="button" class="route-info-toggle" aria-expanded="true" title="접기/펼치기">▼</button>
+            </div>
+            <div class="route-info-content">
+                <table id="route-info-table" class="route-info-table">
+                    <thead>
+                        <tr>
+                            <th>✓</th>
+                            <th>Vehicle</th>
+                            <th>Dist</th>
+                            <th>Time</th>
+                            <th>Load</th>
+                        </tr>
+                    </thead>
+                    <tbody id="route-info-tbody">
+                        <!-- Route data will be populated here -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    
+    
+    
+    <!-- Route Visualization JavaScript -->
+    <script src="{{ url_for('static', filename='js/route-visualization.js') }}"></script>
+    
+    <script>
+        // 페이지 로드 시 팝업과 동일하게 /get-routes에서 가져와 표출
+        document.addEventListener('DOMContentLoaded', async function() {
+            try {
+                initializeStandaloneRouteMap();
+                // 스타일 로드 후 진행
+                const waitStyleLoaded = () => new Promise(res => {
+                    if (routeVisualizationMap && routeVisualizationMap.isStyleLoaded()) return res();
+                    routeVisualizationMap && routeVisualizationMap.once('load', res);
+                    // 로드 이벤트가 이미 지났다면 약간 지연 후 진행
+                    setTimeout(res, 200);
+                });
+                await waitStyleLoaded();
+                const resp = await fetch('/get-routes');
+                const data = await resp.json();
+                if (data && data.success && typeof window.displayAndManageRoutes === 'function') {
+                    window.displayAndManageRoutes(data.vehicle_routes, routeVisualizationMap);
+                }
+            } catch (e) {
+                console.error('Full view load error:', e);
+            }
+        });
+
+        // HTML 저장 기능
+        function saveAsHtml() {
+            const htmlContent = document.documentElement.outerHTML;
+            const blob = new Blob([htmlContent], { type: 'text/html' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'route_visualization_' + new Date().toISOString().slice(0, 19).replace(/:/g, '-') + '.html';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+    </script>
+</body>
+</html>

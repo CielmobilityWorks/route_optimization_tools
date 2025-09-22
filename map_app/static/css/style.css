@@ -1,0 +1,928 @@
+body {
+    margin: 0;
+    padding: 0;
+    font-family: sans-serif;
+}
+
+#container {
+    display: flex;
+    height: 100vh;
+}
+
+#map {
+    flex: 1;
+}
+
+#sidebar {
+    width: 450px;
+    padding: 20px;
+    box-sizing: border-box;
+    overflow-y: hidden; /* 전체 사이드바는 스크롤 없음 */
+    background: #f8f9fa;
+    display: flex;
+    flex-direction: column;
+    padding-bottom: 20px; /* 버튼 영역 패딩 최소화 */
+}
+
+h2 {
+    margin-top: 0;
+    margin-bottom: 5px;
+}
+
+.sidebar-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 15px;
+}
+
+.location-count {
+    font-size: 10px;
+    color: #666;
+}
+
+#location-counter {
+    font-weight: normal;
+}
+
+.file-io {
+    margin-bottom: 15px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+#file-upload {
+    width: 180px;
+}
+
+.button, button {
+    padding: 8px 12px;
+    border: 1px solid #ccc;
+    background-color: #fff;
+    cursor: pointer;
+    text-decoration: none;
+    color: black;
+    border-radius: 4px;
+    font-size: 10px;
+}
+
+.button:hover, button:hover {
+    background-color: #f0f0f0;
+}
+
+.table-container {
+    flex: 1; /* 남은 공간을 모두 차지 */
+    overflow-y: auto; /* 세로 스크롤 추가 */
+    overflow-x: hidden; /* 가로 스크롤 숨김 */
+    max-height: calc(100vh - 180px); /* 헤더, 파일 업로드, 버튼 영역 고려 */
+    border: 1px solid #ddd;
+    border-radius: 4px;
+}
+
+#location-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 10px;
+    table-layout: fixed; /* 고정 레이아웃으로 컬럼 너비 제어 */
+}
+
+#location-table th, #location-table td {
+    border: 1px solid #ddd;
+    padding: 6px 4px; /* 패딩 줄여서 공간 절약 */
+    text-align: left;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#location-table th {
+    background-color: #e9ecef;
+    position: sticky; /* 테이블 헤더 고정 */
+    top: 0;
+    z-index: 10;
+}
+
+/* 각 컬럼 너비 지정 */
+#location-table th:nth-child(1), #location-table td:nth-child(1) { width: 15%; } /* ID */
+#location-table th:nth-child(2), #location-table td:nth-child(2) { width: 30%; } /* Name */
+#location-table th:nth-child(3), #location-table td:nth-child(3) { width: 10.5%; } /* Lon */
+#location-table th:nth-child(4), #location-table td:nth-child(4) { width: 10.5%; } /* Lat */
+#location-table th:nth-child(5), #location-table td:nth-child(5) { width: 12%; } /* Demand (wider) */
+#location-table th:nth-child(6), #location-table td:nth-child(6) { width: 21%; } /* Actions */
+
+/* Align numeric data to right for Lon, Lat, Demand */
+#location-table td:nth-child(3),
+#location-table td:nth-child(4),
+#location-table td:nth-child(5) {
+    text-align: right;
+}
+
+#location-table button {
+    padding: 2px 4px;
+    font-size: 9px;
+    min-width: 28px;
+    margin: 1px;
+}
+
+/* 마커 스타일 추가 */
+.marker {
+    background-color: #FF5733; /* 일반 위치 마커 색상 */
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    cursor: pointer;
+    border: 1px solid #fff;
+    box-shadow: 0 0 0 1px rgba(0,0,0,0.2);
+}
+
+/* Depot 마커 스타일 */
+.marker.depot {
+    background-color: #2E86C1; /* Depot은 파란색으로 구분 */
+    width: 12px; /* Depot은 조금 더 크게 */
+    height: 12px;
+    border: 2px solid #fff;
+    box-shadow: 0 0 0 2px rgba(46, 134, 193, 0.3);
+}
+
+.mapboxgl-popup-content {
+    background: rgba(35, 35, 35, 0.8); /* 배경색을 어둡게 변경 */
+    color: #fff; /* 글자색을 흰색으로 변경 */
+    padding: 5px 10px;
+    border-radius: 3px;
+    font-size: 12px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+    pointer-events: none; /* 팝업이 마우스 이벤트를 가로채지 않도록 설정 */
+}
+
+.mapboxgl-popup-anchor-bottom .mapboxgl-popup-tip {
+    border-top-color: rgba(35, 35, 35, 0.8); /* 팁 색상 동기화 */
+}
+
+/* Popup styles */
+#popup, #matrix-popup, #optimization-popup, #loading-popup, #route-settings-popup {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.5);
+    justify-content: center;
+    align-items: center;
+    display: flex; /* Use flexbox for centering */
+    z-index: 1000;
+}
+
+#popup.popup-hidden, #matrix-popup.popup-hidden, #optimization-popup.popup-hidden, #loading-popup.popup-hidden, #route-settings-popup.popup-hidden {
+    display: none !important;
+}
+
+.popup-content {
+    background: white;
+    padding: 20px;
+    border-radius: 5px;
+    width: 300px;
+    max-width: 90vw;
+    font-size: 13px;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+}
+
+.popup-content h3 {
+    margin-top: 0;
+    margin-bottom: 18px;
+    font-size: 16px;
+    font-weight: 600;
+    color: #333;
+}
+
+/* Route Settings Popup */
+.route-settings-popup-content {
+    width: 480px;
+    max-width: 95vw;
+}
+
+.popup-content label {
+    display: block;
+    margin-top: 10px;
+}
+
+.popup-content input {
+    width: 100%;
+    padding: 8px;
+    margin-top: 5px;
+    box-sizing: border-box;
+}
+
+.popup-buttons {
+    margin-top: 20px;
+    text-align: right;
+    gap: 8px;
+    display: flex;
+    justify-content: flex-end;
+}
+
+.popup-buttons button {
+    padding: 8px 16px;
+    font-size: 13px;
+    font-family: inherit;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.popup-buttons button {
+    margin-left: 10px;
+}
+
+/* 사이드바 하단 버튼 영역 */
+.sidebar-buttons {
+    display: flex;
+    gap: 10px;
+    margin-top: 15px;
+    padding-top: 15px;
+    border-top: 1px solid #ddd;
+    justify-content: flex-start;
+}
+
+/* .sidebar-buttons > div의 flex: 1을 제거하여 버튼이 내용에 맞는 크기만 차지하도록 함 */
+
+
+
+#create-matrix-btn button {
+    background-color: #007bff;
+    color: white;
+    border: none;
+    padding: 12px 20px;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+    transition: all 0.2s ease;
+}
+
+#create-matrix-btn button:hover {
+    background-color: #0056b3;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+
+#optimization-btn button {
+    background-color: #28a745;
+    color: white;
+    border: none;
+    padding: 12px 20px;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+    transition: all 0.2s ease;
+}
+
+#optimization-btn button:hover:not(:disabled) {
+    background-color: #218838;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+
+#optimization-btn button:disabled {
+    background-color: #6c757d;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+
+#route-view-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+}
+
+#route-view-btn button {
+    color: white;
+    border: none;
+    padding: 12px 20px;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+    transition: all 0.2s ease;
+    width: 100%;
+    max-width: 200px;
+}
+
+#route-view-button {
+    background-color: #6f42c1;
+}
+
+#route-view-button:hover:not(:disabled) {
+    background-color: #5a2d91;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+
+#route-refresh-button {
+    background-color: #fd7e14;
+    padding: 8px 16px;
+    font-size: 12px;
+}
+
+#route-refresh-button:hover:not(:disabled) {
+    background-color: #e8690a;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+
+#route-view-btn button:disabled {
+    background-color: #6c757d;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+
+/* Matrix Popup Styles */
+.matrix-popup-content {
+    width: 300px;
+    max-width: 90vw;
+    font-size: 10px;
+}
+
+/* Optimization Popup Styles */
+.optimization-popup-content {
+    width: 700px;
+    max-width: 95vw;
+    max-height: 90vh;
+    overflow-y: auto;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    font-size: 13px;
+    line-height: 1.4;
+}
+
+.optimization-popup-content .form-section {
+    margin-bottom: 18px;
+    padding: 12px 15px;
+    background-color: #f8f9fa;
+    border-radius: 6px;
+    border-left: 4px solid #007bff;
+}
+
+.optimization-popup-content .section-label {
+    display: block;
+    margin-bottom: 8px;
+    font-weight: 600;
+    color: #333;
+    font-size: 14px;
+}
+
+.optimization-popup-content input[type="number"] {
+    width: 100%;
+    padding: 6px 8px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 13px;
+    box-sizing: border-box;
+    font-family: inherit;
+}
+
+/* Form layout */
+.form-row {
+    display: flex;
+    gap: 15px;
+    align-items: end;
+}
+
+.form-col {
+    flex: 1;
+}
+
+.form-col label {
+    display: block;
+    margin-bottom: 4px;
+    font-weight: 500;
+    color: #555;
+    font-size: 13px;
+}
+
+/* Radio groups */
+.radio-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.radio-group.horizontal {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 12px;
+}
+
+.radio-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 3px;
+    transition: background-color 0.2s;
+    font-size: 13px;
+    font-weight: 400;
+    line-height: 1.4;
+}
+
+.radio-label:hover {
+    background-color: #e9ecef;
+}
+
+.radio-label input[type="radio"] {
+    margin: 0;
+    width: 14px;
+    height: 14px;
+}
+
+.recommended {
+    color: #28a745;
+    font-weight: 500;
+    font-size: 13px;
+    font-style: normal;
+}
+
+.description {
+    color: #666;
+    font-size: 13px;
+    font-style: normal;
+    font-weight: 400;
+    margin-left: 4px;
+}
+
+.option-text {
+    font-size: 13px;
+    font-weight: 400;
+    line-height: 1.4;
+    color: #333;
+}
+
+/* Tiebreaker section */
+.tiebreaker-section {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.tiebreaker-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.tiebreaker-label {
+    min-width: 100px;
+    font-weight: 500;
+    color: #555;
+    font-size: 13px;
+}
+
+/* Checkbox groups */
+.checkbox-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.checkbox-label {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 3px;
+    transition: background-color 0.2s;
+    font-size: 13px;
+    font-weight: 400;
+    line-height: 1.4;
+}
+
+.checkbox-label:hover {
+    background-color: #e9ecef;
+}
+
+.checkbox-label input[type="checkbox"] {
+    margin: 1px 0 0 0;
+    flex-shrink: 0;
+    width: 14px;
+    height: 14px;
+}
+
+/* Industry buttons */
+.industry-buttons {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.industry-btn {
+    padding: 6px 12px;
+    border: 1px solid #007bff;
+    background-color: white;
+    color: #007bff;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    font-family: inherit;
+    transition: all 0.2s;
+}
+
+.industry-btn:hover {
+    background-color: #007bff;
+    color: white;
+}
+
+/* Preview section */
+.preview-section {
+    background-color: white;
+    border: 1px solid #dee2e6;
+    border-radius: 4px;
+    padding: 12px;
+}
+
+.optimization-preview {
+    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+    background-color: #f8f9fa;
+    padding: 8px 10px;
+    border-radius: 4px;
+    border-left: 3px solid #007bff;
+    margin-bottom: 8px;
+    font-size: 12px;
+    color: #333;
+    line-height: 1.4;
+}
+
+.optimization-warnings {
+    font-size: 12px;
+}
+
+.warning-item {
+    color: #dc3545;
+    margin-bottom: 3px;
+    line-height: 1.3;
+}
+
+.warning-item::before {
+    content: "⚠️ ";
+}
+
+.form-section {
+    margin-bottom: 25px;
+}
+
+.section-label {
+    display: block;
+    font-weight: bold;
+    margin-bottom: 10px;
+    color: #333;
+}
+
+.radio-group {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+
+.radio-label {
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 4px;
+    transition: background-color 0.2s ease;
+    font-size: 10px;
+}
+
+.radio-label:hover:not(:has(input:disabled)) {
+    background-color: #f8f9fa;
+}
+
+.radio-label input[type="radio"] {
+    margin-right: 10px;
+    width: auto;
+}
+
+.radio-label input[type="radio"]:disabled {
+    cursor: not-allowed;
+}
+
+.radio-label:has(input:disabled) {
+    color: #ccc;
+    cursor: not-allowed;
+}
+
+
+
+/* Loading Popup Styles */
+.loading-popup-content {
+    width: 450px;
+    max-width: 95vw;
+    text-align: center;
+}
+
+.loading-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px;
+}
+
+.loading-spinner {
+    width: 50px;
+    height: 50px;
+    border: 4px solid #f3f3f3;
+    border-top: 4px solid #2196f3;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    margin-bottom: 20px;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+.loading-container h3 {
+    margin: 0 0 15px 0;
+    color: #333;
+    font-size: 18px;
+}
+
+.loading-container p {
+    margin: 0;
+    color: #666;
+    font-size: 14px;
+    line-height: 1.4;
+}
+
+/* Loading popup should not be closable */
+#loading-popup {
+    pointer-events: none;
+}
+
+#loading-popup .popup-content {
+    pointer-events: auto;
+}
+
+/* Progress Bar Styles */
+.progress-container {
+    margin: 25px 0 20px 0;
+    width: 100%;
+}
+
+.progress-bar {
+    width: 100%;
+    height: 20px;
+    background-color: #e9ecef;
+    border-radius: 10px;
+    overflow: hidden;
+    margin-bottom: 10px;
+    box-shadow: inset 0 1px 3px rgba(0,0,0,0.2);
+}
+
+.progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #2196f3, #21cbf3);
+    width: 0%;
+    transition: width 0.3s ease;
+    border-radius: 10px;
+    position: relative;
+    animation: progressShine 2s infinite;
+}
+
+@keyframes progressShine {
+    0% { background-position: -200px 0; }
+    100% { background-position: 200px 0; }
+}
+
+.progress-fill::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(
+        90deg,
+        transparent,
+        rgba(255,255,255,0.4),
+        transparent
+    );
+    animation: progressSlide 2s infinite;
+}
+
+@keyframes progressSlide {
+    0% { left: -100%; }
+    100% { left: 100%; }
+}
+
+.progress-info {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 14px;
+    font-weight: 500;
+}
+
+#progress-percentage {
+    color: #2196f3;
+    font-weight: bold;
+}
+
+#progress-time {
+    color: #666;
+    font-family: 'Courier New', monospace;
+}
+
+/* Status Details */
+.status-details {
+    margin-top: 20px;
+    padding: 18px 20px;
+    background-color: #f8f9fa;
+    border-radius: 8px;
+    border-left: 4px solid #2196f3;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.status-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+    font-size: 14px;
+    min-height: 20px;
+}
+
+.status-item:last-child {
+    margin-bottom: 0;
+}
+
+.status-label {
+    color: #495057;
+    font-weight: 600;
+    flex-shrink: 0;
+    margin-right: 15px;
+}
+
+#current-step {
+    color: #2196f3;
+    font-weight: bold;
+    text-align: right;
+    flex: 1;
+}
+
+#estimated-time {
+    color: #28a745;
+    font-weight: 600;
+    text-align: right;
+    flex: 1;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+
+/* Depot row styling */
+.depot-row {
+    background-color: #e3f2fd !important;
+}
+
+.depot-row:hover {
+    background-color: #bbdefb !important;
+}
+
+.depot-row td {
+    font-weight: 500;
+}
+
+.depot-id {
+    color: #1976d2;
+    font-weight: bold;
+}
+
+/* Name column text overflow handling */
+#location-table td:nth-child(2) {
+    max-width: 120px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* Actions column uses percentage width above; keep nowrap for buttons */
+#location-table td:nth-child(6) {
+    white-space: nowrap;
+}
+
+/* Route Visualization Modal Styles */
+#route-modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0, 0, 0, 0.7);
+    z-index: 9999;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+#route-modal.route-modal-hidden {
+    display: none;
+}
+
+.route-modal-content {
+    background: white;
+    width: 90%;
+    height: 85%;
+    max-width: 1200px;
+    border-radius: 8px;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.route-modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 15px;
+    border-bottom: 1px solid #e0e0e0;
+    background-color: #f8f9fa;
+}
+
+.route-modal-header h3 {
+    margin: 0;
+    color: #333;
+    font-size: 12px;
+}
+
+.route-modal-controls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+#route-refresh-button {
+    background: #007bff;
+    color: white;
+    border: none;
+    padding: 6px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 11px;
+    transition: background-color 0.2s;
+}
+
+#route-refresh-button:hover {
+    background: #0056b3;
+}
+
+#route-refresh-button:disabled {
+    background: #ccc;
+    cursor: not-allowed;
+}
+
+.route-modal-close {
+    background: none;
+    border: none;
+    font-size: 24px;
+    cursor: pointer;
+    color: #666;
+    padding: 0;
+    width: 30px;
+    height: 30px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+}
+
+.route-modal-close:hover {
+    background-color: #e0e0e0;
+}
+
+.route-modal-body {
+    flex: 1;
+    padding: 0;
+    position: relative;
+}
+
+.route-map-container {
+    width: 100%;
+    height: 100%;
+    position: relative;
+}
+
+/* 로딩 애니메이션 */
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}

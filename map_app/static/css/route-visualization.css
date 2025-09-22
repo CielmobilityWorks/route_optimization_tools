@@ -1,0 +1,528 @@
+/**
+ * Route Visualization CSS Module
+ * 독립적인 route visualization 스타일
+ */
+
+/* Route Visualization Modal Styles (기존 스타일 유지) */
+#route-modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0, 0, 0, 0.5);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+}
+
+#route-modal.route-modal-hidden {
+    display: none;
+}
+
+.route-modal-content {
+    background: white;
+    width: 95%;
+    height: 90%;
+    max-width: 2000px;
+    border-radius: 8px;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.route-modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 15px;
+    border-bottom: 1px solid #e0e0e0;
+    background-color: #f8f9fa;
+}
+
+.route-modal-header h3 {
+    margin: 0;
+    color: #333;
+    font-size: 12px;
+}
+
+.route-modal-close {
+    background: none;
+    border: none;
+    font-size: 24px;
+    cursor: pointer;
+    color: #666;
+    padding: 0;
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background-color 0.2s;
+}
+
+.route-modal-close:hover {
+    background-color: #e0e0e0;
+    color: #333;
+}
+
+.route-modal-body {
+    flex: 1;
+    padding: 0;
+    position: relative;
+}
+
+.route-map-container {
+    width: 100%;
+    height: 100%;
+    position: relative;
+}
+
+#route-map {
+    width: 100%;
+    height: 100%;
+}
+
+/* Standalone Route Visualization Styles */
+.route-visualization-page {
+    min-height: 100vh;
+    background-color: #f5f5f5;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+
+.route-header {
+    background: white;
+    padding: 20px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    margin-bottom: 20px;
+}
+
+.route-header h1 {
+    margin: 0 0 10px 0;
+    color: #333;
+    font-size: 28px;
+    font-weight: 600;
+}
+
+.route-header .subtitle {
+    color: #666;
+    font-size: 14px;
+    margin: 0;
+}
+
+.route-controls {
+    display: flex;
+    justify-content: center;
+    gap: 12px;
+    margin-bottom: 20px;
+    padding: 0 20px;
+}
+
+.route-btn {
+    padding: 10px 20px;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+    transition: all 0.3s ease;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.route-btn-primary {
+    background-color: #007bff;
+    color: white;
+}
+
+.route-btn-primary:hover {
+    background-color: #0056b3;
+    transform: translateY(-1px);
+}
+
+.route-btn-secondary {
+    background-color: #6c757d;
+    color: white;
+}
+
+.route-btn-secondary:hover {
+    background-color: #545b62;
+    transform: translateY(-1px);
+}
+
+.route-btn-success {
+    background-color: #28a745;
+    color: white;
+}
+
+.route-btn-success:hover {
+    background-color: #1e7e34;
+    transform: translateY(-1px);
+}
+
+.route-btn-info {
+    background-color: #17a2b8;
+    color: white;
+}
+
+.route-btn-info:hover {
+    background-color: #117a8b;
+    transform: translateY(-1px);
+}
+
+/* Route Map Container for Standalone */
+.route-map-wrapper {
+    margin: 0 20px;
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    overflow: hidden;
+    height: 600px;
+}
+
+.route-map-standalone {
+    width: 100%;
+    height: 100%;
+}
+
+/* Route Information Panel */
+.route-info-panel {
+    background: white;
+    margin: 20px;
+    padding: 25px;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.route-info-panel h3 {
+    margin: 0 0 20px 0;
+    color: #333;
+    font-size: 20px;
+    font-weight: 600;
+    border-bottom: 2px solid #007bff;
+    padding-bottom: 10px;
+}
+
+.route-stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 20px;
+}
+
+.route-stat-card {
+    padding: 20px;
+    background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+    border-radius: 8px;
+    text-align: center;
+    border: 1px solid #e0e0e0;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.route-stat-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+
+.route-stat-label {
+    font-size: 12px;
+    color: #666;
+    text-transform: uppercase;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    margin-bottom: 8px;
+}
+
+.route-stat-value {
+    font-size: 24px;
+    font-weight: bold;
+    color: #333;
+    margin: 0;
+}
+
+/* Route Legend */
+.route-legend {
+    background: white;
+    margin: 20px;
+    padding: 20px;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.route-legend h4 {
+    margin: 0 0 15px 0;
+    color: #333;
+    font-size: 16px;
+}
+
+.route-legend-items {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 15px;
+}
+
+.route-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: #f8f9fa;
+    border-radius: 4px;
+    border: 1px solid #e0e0e0;
+}
+
+.route-legend-color {
+    width: 20px;
+    height: 4px;
+    border-radius: 2px;
+}
+
+.route-legend-text {
+    font-size: 14px;
+    color: #333;
+}
+
+/* Loading Spinner */
+.route-loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 200px;
+    background: #f8f9fa;
+    color: #666;
+    font-size: 16px;
+}
+
+.route-spinner {
+    width: 20px;
+    height: 20px;
+    border: 2px solid #e0e0e0;
+    border-top: 2px solid #007bff;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    margin-right: 10px;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+/* Error Message */
+.route-error {
+    background: #f8d7da;
+    color: #721c24;
+    padding: 15px;
+    border-radius: 4px;
+    border: 1px solid #f5c6cb;
+    margin: 20px;
+    text-align: center;
+}
+
+/* Success Message */
+.route-success {
+    background: #d4edda;
+    color: #155724;
+    padding: 15px;
+    border-radius: 4px;
+    border: 1px solid #c3e6cb;
+    margin: 20px;
+    text-align: center;
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+    .route-controls {
+        flex-direction: column;
+        align-items: center;
+    }
+    
+    .route-btn {
+        width: 100%;
+        max-width: 300px;
+        justify-content: center;
+    }
+    
+    .route-stats-grid {
+        grid-template-columns: 1fr;
+    }
+    
+    .route-modal-content {
+        width: 95%;
+        height: 90%;
+    }
+    
+    .route-map-wrapper {
+        margin: 0 10px;
+        height: 400px;
+    }
+    
+    .route-info-panel,
+    .route-legend {
+        margin: 10px;
+    }
+}
+
+@media (max-width: 480px) {
+    .route-header {
+        padding: 15px;
+    }
+    
+    .route-header h1 {
+        font-size: 24px;
+    }
+    
+    .route-info-panel,
+    .route-legend {
+        padding: 15px;
+    }
+    
+    .route-stat-card {
+        padding: 15px;
+    }
+    
+    .route-stat-value {
+        font-size: 20px;
+    }
+}
+
+/* Print Styles */
+@media print {
+    .route-controls {
+        display: none !important;
+    }
+    
+    .route-map-wrapper {
+        height: 400px !important;
+        break-inside: avoid;
+        margin: 10px 0;
+    }
+    
+    .route-info-panel {
+        break-inside: avoid;
+        margin: 10px 0;
+    }
+    
+    .route-header {
+        background: white !important;
+        box-shadow: none !important;
+        border-bottom: 2px solid #ccc;
+    }
+    
+    body {
+        background: white !important;
+        color: black !important;
+    }
+}
+
+/* Route Information Overlay Styles */
+.route-info-overlay {
+    position: absolute;
+    top: 60px;
+    right: 10px;
+    width: 280px;
+    max-height: calc(100% - 80px);
+    background-color: rgba(248, 249, 250, 0.95);
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    display: flex;
+    flex-direction: column;
+    z-index: 1000;
+    backdrop-filter: blur(5px);
+}
+
+.route-info-header {
+    padding: 8px 12px;
+    border-bottom: 1px solid #e0e0e0;
+    background-color: rgba(255, 255, 255, 0.9);
+    border-radius: 8px 8px 0 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.route-info-header h4 {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: #333;
+}
+
+/* Toggle button */
+.route-info-toggle {
+    background: none;
+    border: 1px solid #ced4da;
+    color: #495057;
+    width: 24px;
+    height: 24px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+}
+
+.route-info-toggle:hover {
+    background: #f1f3f5;
+}
+
+.route-info-content {
+    flex: 1;
+    padding: 8px;
+    overflow-y: auto;
+    max-height: 300px;
+    background-color: rgba(255, 255, 255, 0.9);
+    border-radius: 0 0 8px 8px;
+}
+
+/* Collapsed state */
+.route-info-overlay.collapsed .route-info-content {
+    display: none;
+}
+
+.route-info-overlay.collapsed .route-info-toggle::after {
+    content: '';
+}
+
+.route-info-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+    background-color: transparent;
+}
+
+.route-info-table th {
+    background-color: rgba(233, 236, 239, 0.8);
+    padding: 6px 4px;
+    text-align: left;
+    font-weight: 600;
+    border-bottom: 1px solid rgba(222, 226, 230, 0.8);
+    color: #495057;
+    font-size: 10px;
+}
+
+.route-info-table td {
+    padding: 5px 4px;
+    border-bottom: 1px solid rgba(222, 226, 230, 0.5);
+    vertical-align: middle;
+    font-size: 10px;
+    background-color: rgba(255, 255, 255, 0.7);
+}
+
+.route-info-table tbody tr:hover {
+    background-color: rgba(248, 249, 250, 0.9);
+}
+
+.route-checkbox {
+    margin: 0;
+    cursor: pointer;
+    transform: scale(0.8);
+}

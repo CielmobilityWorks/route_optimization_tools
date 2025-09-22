@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset='utf-8' />
+    <title>Route Optimization Tool</title>
+    <meta name='viewport' content='initial-scale=1,maximum-scale=1,user-scalable=no' />
+    <script src='https://api.mapbox.com/mapbox-gl-js/v2.9.1/mapbox-gl.js'></script>
+    <link href='https://api.mapbox.com/mapbox-gl-js/v2.9.1/mapbox-gl.css' rel='stylesheet' />
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/route-visualization.css') }}">
+    <script>
+        // 서버에서 전달받은 Mapbox 토큰을 전역 변수로 설정
+        window.MAPBOX_ACCESS_TOKEN = "{{ mapbox_token }}";
+    </script>
+</head>
+<body>
+
+<div id='container'>
+    <div id='map'></div>
+    <div id='sidebar'>
+        <div class="sidebar-header">
+            <h2>Locations</h2>
+            <div class="location-count">
+                <span id="location-counter">Total: 0</span>
+            </div>
+        </div>
+        <div class="file-io">
+            <form id="upload-form" method="post" enctype="multipart/form-data">
+                <input type="file" id="file-upload" name="file" accept=".csv" onchange="uploadFile()">
+            </form>
+            <a href="/download" class="button">Download CSV</a>
+        </div>
+        <div class="table-container">
+            <table id='location-table'>
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Name</th>
+                        <th>Lon</th>
+                        <th>Lat</th>
+                        <th>Demand</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <!-- Data will be inserted here by JavaScript -->
+                </tbody>
+            </table>
+        </div>
+        
+        <!-- 사이드바 하단 버튼 영역 -->
+        <div class="sidebar-buttons">
+            <div id="create-matrix-btn">
+                <button onclick="openMatrixPopup()">Create Matrix</button>
+            </div>
+            <div id="optimization-btn">
+                <button id="optimization-button" onclick="openOptimizationPopup()" disabled>Optimization</button>
+            </div>
+            <div id="route-view-btn">
+                <button id="route-view-button" onclick="openRouteViewModal()" disabled>
+                    View Routes
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Popup for adding/editing data -->
+<div id="popup" class="popup-hidden">
+    <div class="popup-content">
+        <h3>Location Details</h3>
+        <input type="hidden" id="popup-id">
+        <label for="popup-name">Name:</label>
+        <input type="text" id="popup-name">
+        <label for="popup-lon">Longitude:</label>
+        <input type="text" id="popup-lon" readonly>
+        <label for="popup-lat">Latitude:</label>
+        <input type="text" id="popup-lat" readonly>
+        <label for="popup-demand">Demand:</label>
+        <input type="number" id="popup-demand">
+        <div class="popup-buttons">
+            <button onclick="saveData()">Save</button>
+            <button onclick="closePopup()">Cancel</button>
+        </div>
+    </div>
+</div>
+
+
+
+<!-- Matrix Creation Popup -->
+<div id="matrix-popup" class="popup-hidden">
+    <div class="popup-content matrix-popup-content">
+        <h3>Create Matrix</h3>
+        
+        <div class="form-section">
+            <label class="section-label">Transport Mode:</label>
+            <div class="radio-group">
+                <label class="radio-label">
+                    <input type="radio" name="transportMode" value="car" checked onchange="updateMetricOptions()">
+                    Car
+                </label>
+                <label class="radio-label">
+                    <input type="radio" name="transportMode" value="pedestrian" onchange="updateMetricOptions()">
+                    Pedestrian
+                </label>
+            </div>
+        </div>
+
+        <div class="form-section">
+            <label class="section-label">Metric:</label>
+            <div class="radio-group" id="metric-options">
+                <label class="radio-label">
+                    <input type="radio" name="metric" value="Recommendation" checked>
+                    Recommendation
+                </label>
+                <label class="radio-label">
+                    <input type="radio" name="metric" value="Static">
+                    Static
+                </label>
+                <label class="radio-label">
+                    <input type="radio" name="metric" value="HighStreet" disabled>
+                    HighStreet
+                </label>
+                <label class="radio-label">
+                    <input type="radio" name="metric" value="ShortestDistance" disabled>
+                    ShortestDistance
+                </label>
+                <label class="radio-label">
+                    <input type="radio" name="metric" value="ExcludeStairs" disabled>
+                    ExcludeStairs
+                </label>
+            </div>
+        </div>
+
+        <div class="popup-buttons">
+            <button onclick="createMatrix()">Create</button>
+            <button onclick="closeMatrixPopup()">Cancel</button>
+        </div>
+    </div>
+</div>
+
+<!-- Optimization Popup -->
+<div id="optimization-popup" class="popup-hidden">
+    <div class="popup-content optimization-popup-content">
+        <h3>최적화 설정</h3>
+        
+        <!-- 기본 설정 -->
+        <div class="form-section">
+            <div class="form-row">
+                <div class="form-col">
+                    <label for="vehicle-count">차량 수:</label>
+                    <input type="number" id="vehicle-count" min="1" value="1">
+                </div>
+                <div class="form-col">
+                    <label for="vehicle-capacity">차량 용량:</label>
+                    <input type="number" id="vehicle-capacity" min="1" value="10">
+                </div>
+                <div class="form-col">
+                    <label for="time-limit-sec">계산시간(초):</label>
+                    <input type="number" id="time-limit-sec" min="1" value="60" title="최대 탐색 시간(초). 기본 60초">
+                </div>
+            </div>
+            <div class="form-row" style="margin-top: 8px;">
+                <div class="form-col" style="flex:1 1 100%">
+                    <label class="section-label">출발/도착 방식</label>
+                    <div class="radio-group horizontal">
+                        <label class="radio-label">
+                            <input type="radio" name="routeMode" value="FREE_START_DEPOT_END" checked>
+                            <span class="option-text">자유 출발(Depot 집결)</span>
+                        </label>
+                        <label class="radio-label" style="margin-left:16px;">
+                            <input type="radio" name="routeMode" value="DEPOT_START_OPEN_END">
+                            <span class="option-text">오픈 엔드(Depot 출발)</span>
+                        </label>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 1. 주 목적 -->
+        <div class="form-section">
+            <label class="section-label">1. 주 목적 (필수 선택)</label>
+            <div class="radio-group">
+                <label class="radio-label">
+                    <input type="radio" name="primaryObjective" value="distance" checked onchange="updateTiebreakerDefaults()">
+                    <span class="option-text">총 거리 최소화 <span class="recommended">(가장 보편적)</span></span>
+                </label>
+                <label class="radio-label">
+                    <input type="radio" name="primaryObjective" value="time" onchange="updateTiebreakerDefaults()">
+                    <span class="option-text">총 시간 최소화</span>
+                </label>
+                <label class="radio-label">
+                    <input type="radio" name="primaryObjective" value="vehicles" onchange="updateTiebreakerDefaults()">
+                    <span class="option-text">차량 수 최소화 <span class="recommended">(차량 투입 억제 중심)</span></span>
+                </label>
+                <label class="radio-label">
+                    <input type="radio" name="primaryObjective" value="cost" onchange="updateTiebreakerDefaults()">
+                    <span class="option-text">총 비용 최소화 <span class="recommended">(고정비+변동비)</span></span>
+                </label>
+                <label class="radio-label">
+                    <input type="radio" name="primaryObjective" value="makespan" onchange="updateTiebreakerDefaults()">
+                    <span class="option-text">최대 경로 시간(makespan) 최소화 <span class="recommended">(가장 긴 차량 경로를 줄임)</span></span>
+                </label>
+            </div>
+        </div>
+
+        <!-- 2. 타이브레이커 -->
+        <div class="form-section">
+            <label class="section-label">2. 타이브레이커 (우선순위)</label>
+            <div class="tiebreaker-section">
+                <div class="tiebreaker-row">
+                    <label class="tiebreaker-label">타이브레이커 1:</label>
+                    <div class="radio-group horizontal">
+                        <label class="radio-label"><input type="radio" name="tiebreaker1" value="none" checked><span class="option-text">없음</span></label>
+                        <label class="radio-label"><input type="radio" name="tiebreaker1" value="distance"><span class="option-text">총 거리</span></label>
+                        <label class="radio-label"><input type="radio" name="tiebreaker1" value="time"><span class="option-text">총 시간</span></label>
+                        <label class="radio-label"><input type="radio" name="tiebreaker1" value="vehicles"><span class="option-text">차량 수</span></label>
+                        <label class="radio-label"><input type="radio" name="tiebreaker1" value="makespan"><span class="option-text">makespan</span></label>
+                    </div>
+                </div>
+                <div class="tiebreaker-row">
+                    <label class="tiebreaker-label">타이브레이커 2:</label>
+                    <div class="radio-group horizontal">
+                        <label class="radio-label"><input type="radio" name="tiebreaker2" value="none" checked><span class="option-text">없음</span></label>
+                        <label class="radio-label"><input type="radio" name="tiebreaker2" value="distance"><span class="option-text">총 거리</span></label>
+                        <label class="radio-label"><input type="radio" name="tiebreaker2" value="time"><span class="option-text">총 시간</span></label>
+                        <label class="radio-label"><input type="radio" name="tiebreaker2" value="vehicles"><span class="option-text">차량 수</span></label>
+                        <label class="radio-label"><input type="radio" name="tiebreaker2" value="makespan"><span class="option-text">makespan</span></label>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 3. 추가 목적 -->
+        <div class="form-section">
+            <label class="section-label">3. 추가 목적 포함 (다중 선택)</label>
+            <div class="checkbox-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" name="additionalObjectives" value="timeWindow">
+                    <span class="option-text">시간창 위반 패널티 포함 <span class="description">(지각·조기 도착 총량 최소화)</span></span>
+                </label>
+                <label class="checkbox-label">
+                    <input type="checkbox" name="additionalObjectives" value="waitTime">
+                    <span class="option-text">고객 대기시간 최소화 <span class="description">(픽업/하차 대기 합 최소화)</span></span>
+                </label>
+                <label class="checkbox-label">
+                    <input type="checkbox" name="additionalObjectives" value="workloadBalance">
+                    <span class="option-text">작업량 균등화 <span class="description">(차량 간 경로시간/탑재량 불균형 최소화)</span></span>
+                </label>
+                <label class="checkbox-label">
+                    <input type="checkbox" name="additionalObjectives" value="overtime">
+                    <span class="option-text">운전자 오버타임 최소화 <span class="description">(근무 상한 초과분 최소화)</span></span>
+                </label>
+                <label class="checkbox-label">
+                    <input type="checkbox" name="additionalObjectives" value="co2">
+                    <span class="option-text">CO₂ 배출 최소화 포함 <span class="description">(거리×배출계수 최소화, 환경 고려 시)</span></span>
+                </label>
+                <label class="checkbox-label">
+                    <input type="checkbox" name="additionalObjectives" value="fixedCost">
+                    <span class="option-text">차량 고정비 고려 <span class="description">(차량 수에 비례한 비용항 포함 → 사실상 차량 억제 강화)</span></span>
+                </label>
+                <label class="checkbox-label">
+                    <input type="checkbox" name="additionalObjectives" value="utilization">
+                    <span class="option-text">차량 이용률 향상 항목 포함 <span class="description">(미이용 시간/공차율 최소화 방식으로 반영)</span></span>
+                </label>
+            </div>
+        </div>
+
+        <!-- 4. 산업별 권장 -->
+        <div class="form-section">
+            <label class="section-label">4. 산업별 권장 설정</label>
+            <div class="industry-buttons">
+                <button type="button" class="industry-btn" onclick="applyIndustrySettings('food')" title="주 목적=총 시간 / 타이브레이커1=makespan / 체크=시간창, 대기시간, CO₂(선택)">음식배달</button>
+                <button type="button" class="industry-btn" onclick="applyIndustrySettings('delivery')" title="주 목적=총 거리 / 타이브레이커1=차량 수 / 체크=시간창, 작업량 균등">택배</button>
+                <button type="button" class="industry-btn" onclick="applyIndustrySettings('medical')" title="주 목적=makespan / 타이브레이커1=총 시간 / 체크=시간창, 오버타임">의료이송</button>
+                <button type="button" class="industry-btn" onclick="applyIndustrySettings('waste')" title="주 목적=총 시간 / 타이브레이커1=총 거리 / 체크=작업량 균등, 차량 고정비">폐기물</button>
+            </div>
+        </div>
+
+        <!-- 5. 미리보기 -->
+        <div class="form-section">
+            <label class="section-label">5. 최적화식 미리보기</label>
+            <div class="preview-section">
+                <div id="optimization-preview" class="optimization-preview">
+                    Min [총거리], 타이브레이커: 없음
+                </div>
+                <div id="optimization-warnings" class="optimization-warnings">
+                    <!-- 경고 메시지가 여기에 표시됩니다 -->
+                </div>
+            </div>
+        </div>
+
+        <div class="popup-buttons">
+            <button onclick="runOptimization()">최적화 실행</button>
+            <button onclick="closeOptimizationPopup()">취소</button>
+        </div>
+    </div>
+</div>
+
+<!-- Loading Popup -->
+<div id="loading-popup" class="popup-hidden">
+    <div class="popup-content loading-popup-content">
+        <div class="loading-container">
+            <div class="loading-spinner"></div>
+            <h3>최적화 진행 중...</h3>
+            <p id="loading-message">차량 경로 최적화를 계산하고 있습니다.</p>
+            
+            <!-- Progress Bar -->
+            <div class="progress-container">
+                <div class="progress-bar">
+                    <div id="progress-fill" class="progress-fill"></div>
+                </div>
+                <div class="progress-info">
+                    <span id="progress-percentage">0%</span>
+                    <span id="progress-time">00:00</span>
+                </div>
+            </div>
+            
+            <!-- Status Details -->
+            <div class="status-details">
+                <div class="status-item">
+                    <span class="status-label">단계:</span>
+                    <span id="current-step">준비 중</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">예상 시간:</span>
+                    <span id="estimated-time">계산 중...</span>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Route Visualization Modal -->
+<div id="route-modal" class="route-modal-hidden">
+    <div class="route-modal-content">
+        <div class="route-modal-header">
+            <h3>Route Visualization</h3>
+            <div class="route-modal-controls">
+                <button id="route-refresh-button" onclick="refreshRoutes()" title="T-map API로 새로운 경로 생성">
+                    Refresh Routes
+                </button>
+                <button class="route-modal-close" onclick="closeRouteViewModal()">&times;</button>
+            </div>
+        </div>
+        <div class="route-modal-body">
+            <div id="route-map" class="route-map-container"></div>
+            <!-- 지도 위 오버레이 정보 패널 -->
+            <div id="route-info-overlay" class="route-info-overlay">
+                <div class="route-info-header">
+                    <h4>Route Information</h4>
+                    <button type="button" class="route-info-toggle" aria-expanded="true" title="접기/펼치기">
+                        ▼
+                    </button>
+                </div>
+                <div class="route-info-content">
+                    <table id="route-info-table" class="route-info-table">
+                        <thead>
+                            <tr>
+                                <th>✓</th>
+                                <th>Vehicle</th>
+                                <th>Dist</th>
+                                <th>Time</th>
+                                <th>Load</th>
+                            </tr>
+                        </thead>
+                        <tbody id="route-info-tbody">
+                            <!-- Route data will be populated here -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Route Settings Popup (for Refresh Routes) -->
+<div id="route-settings-popup" class="popup-hidden">
+    <div class="popup-content route-settings-popup-content">
+        <h3>Route Option</h3>
+
+        <!-- 1. searchoption -->
+        <div class="form-section">
+            <label class="section-label">검색 옵션 (searchoption)</label>
+            <div class="radio-group">
+                <label class="radio-label"><input type="radio" name="searchoption" value="교통최적+추천" checked> 교통최적+추천</label>
+                <label class="radio-label"><input type="radio" name="searchoption" value="교통최적+무료우선"> 교통최적+무료우선</label>
+                <label class="radio-label"><input type="radio" name="searchoption" value="교통최적+최소시간"> 교통최적+최소시간</label>
+                <label class="radio-label"><input type="radio" name="searchoption" value="교통최적+초보"> 교통최적+초보</label>
+                <label class="radio-label"><input type="radio" name="searchoption" value="교통최적+화물차"> 교통최적+화물차</label>
+            </div>
+        </div>
+
+        <!-- 2. carType -->
+        <div class="form-section">
+            <label class="section-label">차량 유형 (carType)</label>
+            <div class="radio-group">
+                <label class="radio-label"><input type="radio" name="carType" value="승용차" checked> 승용차</label>
+                <label class="radio-label"><input type="radio" name="carType" value="중형승합차"> 중형승합차</label>
+                <label class="radio-label"><input type="radio" name="carType" value="대형승합차"> 대형승합차</label>
+                <label class="radio-label"><input type="radio" name="carType" value="대형화물차"> 대형화물차</label>
+                <label class="radio-label"><input type="radio" name="carType" value="특수화물차"> 특수화물차</label>
+            </div>
+        </div>
+
+        <!-- 3. viaTime -->
+        <div class="form-section">
+            <label class="section-label" for="via-time-input">경유지 대기시간 (viaTime, 초)</label>
+            <input type="number" id="via-time-input" min="0" value="60" />
+        </div>
+
+        <!-- 4. startTime -->
+        <div class="form-section">
+            <label class="section-label" for="start-time-input">출발 시간 (startTime)</label>
+            <input type="datetime-local" id="start-time-input" />
+        </div>
+
+        <div class="popup-buttons">
+            <button type="button" onclick="closeRouteSettingsPopup()">Cancel</button>
+            <button type="button" id="route-settings-apply-button">Routes</button>
+        </div>
+    </div>
+    
+</div>
+
+<!-- Route Visualization Module -->
+<script src="{{ url_for('static', filename='js/route-visualization.js') }}"></script>
+<script src="{{ url_for('static', filename='js/main.js') }}"></script>
+
+<!-- HTML 내보내기 버튼 추가 -->
+<script>
+// 기존 팝업에 HTML 내보내기 기능 추가
+function addExportButtons() {
+    const modalBody = document.querySelector('.route-modal-body');
+    if (modalBody && !document.getElementById('export-controls')) {
+        const exportDiv = document.createElement('div');
+        exportDiv.id = 'export-controls';
+        exportDiv.style.cssText = 'position: absolute; top: 10px; right: 10px; z-index: 1000; display: flex; gap: 5px;';
+        
+        const openFullBtn = document.createElement('button');
+        openFullBtn.innerHTML = '🔗 Full View';
+        openFullBtn.style.cssText = 'padding: 5px 10px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;';
+        openFullBtn.onclick = () => openFullRouteVisualization();
+        
+        const saveHtmlBtn = document.createElement('button');
+        saveHtmlBtn.innerHTML = '💾 Save HTML';
+        saveHtmlBtn.style.cssText = 'padding: 5px 10px; background: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;';
+        saveHtmlBtn.onclick = () => generateAndSaveRouteHtml();
+        
+        exportDiv.appendChild(openFullBtn);
+        exportDiv.appendChild(saveHtmlBtn);
+        modalBody.style.position = 'relative';
+        modalBody.appendChild(exportDiv);
+    }
+}
+
+// 전체 화면 route visualization 열기
+function openFullRouteVisualization() {
+    const url = '/route-visualization';
+    window.open(url, '_blank', 'width=1200,height=800');
+}
+
+// Route HTML 생성 및 저장
+function generateAndSaveRouteHtml() {
+    // 현재 optimization 결과 데이터 수집
+    const routeData = collectCurrentRouteData();
+    
+    fetch('/generate-route-html', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(routeData)
+    })
+    .then(response => response.blob())
+    .then(blob => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `route_visualization_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.html`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    })
+    .catch(error => {
+        console.error('Error generating route HTML:', error);
+        alert('HTML 생성 중 오류가 발생했습니다.');
+    });
+}
+
+// 현재 라우트 데이터 수집 (실제 optimization 결과에서)
+function collectCurrentRouteData() {
+    // 이 함수는 실제 optimization 결과 데이터 구조에 맞게 수정 필요
+    return {
+        routes: [], // 실제 route 데이터
+        statistics: {
+            total_distance: '0 km',
+            total_duration: '0 min',
+            route_count: 0,
+            optimization_score: '0%'
+        },
+        timestamp: new Date().toISOString()
+    };
+}
+
+// 팝업이 열릴 때 export 버튼 추가
+const originalOpenRouteViewModal = window.openRouteViewModal;
+if (typeof originalOpenRouteViewModal === 'function') {
+    window.openRouteViewModal = function() {
+        originalOpenRouteViewModal();
+        setTimeout(addExportButtons, 500);
+    };
+}
+</script>
+
+</body>
+</html>
