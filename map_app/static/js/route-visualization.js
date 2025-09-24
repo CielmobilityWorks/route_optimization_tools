@@ -197,7 +197,7 @@ function updateRouteInfoTable(vehicleRoutes) {
     // 기존 테이블 내용 초기화
     tbody.innerHTML = '';
     
-    const colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8', '#F7DC6F'];
+    const colors = window.ROUTE_COLORS || ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8', '#F7DC6F'];
     let routeIndex = 0;
     
     Object.values(vehicleRoutes).forEach((vehicleRoute) => {
@@ -384,7 +384,7 @@ function displayAndManageRoutes(vehicleRoutes, mapInstance) {
     clearAllRouteLayers(mapInstance);
     
     const bounds = new mapboxgl.LngLatBounds();
-    const colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8', '#F7DC6F'];
+    const colors = window.ROUTE_COLORS || ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8', '#F7DC6F'];
     const vehicleVisibility = {}; // 각 차량의 표시 상태 관리
     
     let routeIndex = 0;
@@ -439,7 +439,7 @@ function displayAndManageRoutes(vehicleRoutes, mapInstance) {
             vehicleRoute.waypoints.forEach((waypoint, index) => {
                 const isDepot = waypoint.type === 'depot';
                 const isStart = index === 0;
-                // const isEnd = index === vehicleRoute.waypoints.length - 1; // 현재 표기엔 미사용
+                const isEnd = index === vehicleRoute.waypoints.length - 1;
 
                 // 마커 요소 생성 (정류장은 SVG 기반 번호 마커로 생성)
                 let markerElement;
@@ -464,9 +464,22 @@ function displayAndManageRoutes(vehicleRoutes, mapInstance) {
                         box-shadow: 0 2px 6px rgba(0,0,0,0.4);
                     `;
                     markerElement.textContent = isStart ? 'START' : 'END';
+                } else if (isEnd) {
+                    // 경로의 마지막 종료 지점: 사각형, 붉은 색, 텍스트 'G' (크기 유지)
+                    markerElement = document.createElement('div');
+                    markerElement.className = 'custom-marker';
+                    markerElement.setAttribute('data-vehicle-id', vehicleId);
+                    markerElement.setAttribute('data-marker-type', 'end');
+                    // SVG 기반으로 생성해 크기/텍스트 정렬을 기존 번호 마커와 동일하게 유지
+                    const size = 32;
+                    const rectSize = 28; // 내부 사각형 크기
+                    const strokeWidth = 3;
+                    const fillColor = '#dc3545'; // 통일된 붉은 색
+                    markerElement.innerHTML = `\n                        <svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" style="display:block;overflow:visible;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.3))">\n                            <rect x="${(size-rectSize)/2}" y="${(size-rectSize)/2}" width="${rectSize}" height="${rectSize}" rx="2" ry="2" fill="${fillColor}" stroke="#ffffff" stroke-width="${strokeWidth}" />\n                            <text x="${size/2}" y="${size/2}"\n                                  fill="#ffffff" font-size="12" font-weight="700"\n                                  text-anchor="middle" dominant-baseline="central"\n                                  style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;">\n                                G\n                            </text>\n                        </svg>\n                    `;
                 } else {
-                    // 번호 마커: 텍스트가 항상 중앙에 오도록 SVG 사용 (1부터 시작)
-                    markerElement = createNumberedMarkerElement(index, color, vehicleId);
+                    // 번호 마커: 시작 지점은 'S'로 표시하고 나머지는 번호로 표시
+                    const labelForMarker = isStart ? 'S' : index;
+                    markerElement = createNumberedMarkerElement(labelForMarker, color, vehicleId);
                 }
 
                 // 팝업 생성

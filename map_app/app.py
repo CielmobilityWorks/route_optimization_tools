@@ -4,6 +4,8 @@ import numpy as np
 import os
 import io
 import json
+import secrets
+import string
 from utils.tmap_utils import create_matrix_from_locations
 from dotenv import load_dotenv
 from urllib.parse import urlencode, urlparse, parse_qs
@@ -33,6 +35,15 @@ def get_project_id() -> str:
     except Exception:
         pid = None
     return _sanitize_project_id(pid)
+
+
+def generate_short_id(length: int = 4) -> str:
+    """대문자 + 숫자로 이루어진 지정 길이의 안전한 랜덤 ID를 생성합니다.
+
+    기본 길이는 4입니다 (예: 'A3Z7'). 소문자는 사용하지 않습니다.
+    """
+    alphabet = string.ascii_uppercase + string.digits
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
 
 def ensure_project_dir(project_id: str) -> str:
     """프로젝트 디렉터리를 보장하고 경로를 반환합니다."""
@@ -124,9 +135,9 @@ def create_project():
         if os.path.exists(proj_dir):
             return jsonify({'error': 'Project already exists'}), 409
         os.makedirs(proj_dir, exist_ok=True)
-        # 초기 locations.csv 생성(Depot 1개)
+        # 초기 locations.csv 생성(Depot 1개) - id는 문자열로 저장
         df = pd.DataFrame([
-            {'id': 1, 'name': 'Depot', 'lon': 126.9779, 'lat': 37.5547, 'demand': 0}
+            {'id': '1', 'name': 'Depot', 'lon': 126.9779, 'lat': 37.5547, 'demand': 0}
         ], columns=['id', 'name', 'lon', 'lat', 'demand'])
         df.to_csv(os.path.join(proj_dir, 'locations.csv'), index=False, encoding='utf-8-sig')
         return jsonify({'created': True, 'id': pid}), 201
@@ -144,6 +155,10 @@ def load_data(project_id: str | None = None):
             try:
                 df = pd.read_csv(locations_file, encoding=encoding)
                 print(f"CSV 파일을 {encoding} 인코딩으로 로드했습니다.")
+                # id 컬럼을 문자열로 통일하여 이후 비교 및 검색 로직에서 타입 문제를 피합니다.
+                if 'id' in df.columns:
+                    # NaN이 있을 수 있으니 빈 값은 빈 문자열로 변환
+                    df['id'] = df['id'].fillna('').astype(str)
                 return df
             except (UnicodeDecodeError, UnicodeError):
                 continue
@@ -193,6 +208,31 @@ def save_optimization_result_to_csv(result, vehicle_count, vehicle_capacity, pro
     # 상세 경로 정보 CSV 저장 (UTF-8 BOM으로 Excel 호환성 확보)
     route_details = []
     # per-route 이전 누적값을 추적하여 정류장별 Load(수요)를 계산
+    # load locations map for id lookup
+    try:
+        loc_df_for_ids = pd.read_csv(project_path('locations.csv', pid), encoding='utf-8-sig')
+    except Exception:
+        try:
+            loc_df_for_ids = pd.read_csv(project_path('locations.csv', pid), encoding='utf-8')
+        except Exception:
+            loc_df_for_ids = pd.DataFrame()
+
+    def _normalize_name_for_lookup(s: str | None) -> str:
+        if s is None:
+            return ''
+        try:
+            return ' '.join(str(s).strip().lower().split())
+        except Exception:
+            return str(s).strip().lower()
+
+    name_to_id = {}
+    if not loc_df_for_ids.empty and 'name' in loc_df_for_ids.columns and 'id' in loc_df_for_ids.columns:
+        for _, lr in loc_df_for_ids.iterrows():
+            try:
+                name_to_id[_normalize_name_for_lookup(lr['name'])] = str(lr['id'])
+            except Exception:
+                continue
+
     for route in result['routes']:
         prev_cum = 0
         for i, waypoint in enumerate(route['waypoints']):
@@ -207,6 +247,7 @@ def save_optimization_result_to_csv(result, vehicle_count, vehicle_capacity, pro
                 'Route_Load': route['load'],
                 'Stop_Order': i + 1,
                 'Location_Name': waypoint['name'],
+                'Location_ID': name_to_id.get(_normalize_name_for_lookup(waypoint.get('name')), ''),
                 'Location_Type': waypoint['type'],
                 'Load': load_delta,
                 'Cumulative_Load': cumulative
@@ -245,22 +286,39 @@ def add_location():
         data = request.json
         pid = get_project_id()
         df = load_data(pid)
-        
-        # 안전한 ID 생성
-        if df.empty or df['id'].empty:
-            new_id = 1
+        # 안전한 6자리 영숫자 ID 생성(충돌 체크 포함)
+        existing_ids = set(df['id'].astype(str).tolist()) if not df.empty and 'id' in df.columns else set()
+        # 만약 테이블이 비어있다면 Depot(초기 생성)이 이미 존재하거나, 새 프로젝트일 수 있음.
+        # 요청으로 특정 id가 제공된 경우(드문 케이스) 우선 사용 가능하도록 처리
+        if data and data.get('id'):
+            candidate = str(data.get('id'))
+            if candidate in existing_ids:
+                return jsonify({'error': 'ID already exists'}), 409
+            new_id = candidate
         else:
-            max_id = df['id'].max()
-            new_id = int(max_id) + 1 if pd.notna(max_id) else 1
-        
+            # 충돌이 거의 발생하지 않으므로 간단한 재시도로 충분
+            attempts = 0
+            new_id = None
+            while attempts < 10:
+                # 기본적으로 4자리(대문자+숫자) ID를 생성합니다.
+                candidate = generate_short_id(4)
+                if candidate not in existing_ids:
+                    new_id = candidate
+                    break
+                attempts += 1
+            if new_id is None:
+                # 드물게 모든 시도가 실패하면 UUIDfallback
+                import uuid
+                new_id = uuid.uuid4().hex[:8]
+
         new_location = {
-            'id': new_id,
+            'id': str(new_id),
             'name': str(data['name']),
             'lon': float(data['lon']),
             'lat': float(data['lat']),
-            'demand': int(data['demand']) if data['demand'] else 0
+            'demand': int(data['demand']) if data.get('demand') else 0
         }
-        
+
         df = pd.concat([df, pd.DataFrame([new_location])], ignore_index=True)
         save_data(df, pid)
         return jsonify(new_location), 201
@@ -268,7 +326,7 @@ def add_location():
         print(f"Error in add_location: {e}")
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/locations/<int:location_id>', methods=['PUT'])
+@app.route('/api/locations/<location_id>', methods=['PUT'])
 def update_location(location_id):
     """기존 위치 정보를 수정합니다."""
     try:
@@ -276,14 +334,21 @@ def update_location(location_id):
         pid = get_project_id()
         df = load_data(pid)
         
-        if location_id in df['id'].values:
-            idx = df[df['id'] == location_id].index[0]
+        # IDs are stored as strings; ensure comparison as string
+        str_id = str(location_id)
+        if str_id in df['id'].values:
+            idx = df[df['id'] == str_id].index[0]
             # 이름 제공 시에만 갱신
             if 'name' in data and data.get('name') is not None:
                 df.loc[idx, 'name'] = str(data.get('name', df.loc[idx, 'name']))
             
             # Check if this is the first location (depot) - force demand to 0
-            is_depot = df.loc[idx, 'id'] == df['id'].min()  # First ID is depot
+            # Depot 결정: 파일상 첫 번째 행(파일 생성 시 Depot을 제일 처음에 둡니다)
+            try:
+                first_id = df.iloc[0]['id']
+            except Exception:
+                first_id = df['id'].min() if 'id' in df.columns else None
+            is_depot = df.loc[idx, 'id'] == first_id
             if is_depot:
                 df.loc[idx, 'demand'] = 0
             else:
@@ -327,13 +392,14 @@ def update_location(location_id):
         print(f"Error in update_location: {e}")
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/locations/<int:location_id>', methods=['DELETE'])
+@app.route('/api/locations/<location_id>', methods=['DELETE'])
 def delete_location(location_id):
     """위치를 삭제합니다."""
     pid = get_project_id()
     df = load_data(pid)
-    if location_id in df['id'].values:
-        df = df[df['id'] != location_id]
+    str_id = str(location_id)
+    if str_id in df['id'].values:
+        df = df[df['id'] != str_id]
         save_data(df, pid)
         return '', 204
     return jsonify({'error': 'Location not found'}), 404
@@ -433,7 +499,14 @@ def upload_file():
         # 컬럼 정규화: 공백 제거 및 소문자 변환, 일부 동의어 매핑
         try:
             original_cols = list(df.columns)
-            normalized = {col: str(col).strip().lower() for col in df.columns}
+            # 칼럼명에서 BOM 또는 보이지 않는 특수문자 제거 후 소문자화
+            def clean_col(c):
+                s = str(c)
+                s = s.replace('\ufeff', '')  # UTF-8 BOM 제거
+                s = s.replace('\u200b', '')  # zero-width space 제거
+                return s.strip().lower()
+
+            normalized = {col: clean_col(col) for col in df.columns}
             df.rename(columns=normalized, inplace=True)
             # 동의어 처리
             synonym_map = {}
@@ -447,22 +520,73 @@ def upload_file():
                 synonym_map['y'] = 'lat'
             if synonym_map:
                 df.rename(columns=synonym_map, inplace=True)
+
             required_cols = ['id', 'name', 'lon', 'lat', 'demand']
             if not all(col in df.columns for col in required_cols):
                 return 'Invalid CSV format. Required columns: id, name, lon, lat, demand', 400
-            # 타입 보정(가능할 때만): 수치형 컬럼 변환 및 NaN 처리 최소화
-            df['id'] = pd.to_numeric(df['id'], errors='coerce')
+
+            # 타입 보정(가능할 때만)
+            # lon/lat은 숫자여야 하며 유효한 범위인지 검사
             df['lon'] = pd.to_numeric(df['lon'], errors='coerce')
             df['lat'] = pd.to_numeric(df['lat'], errors='coerce')
-            # demand는 정수로, 결측은 0
-            df['demand'] = pd.to_numeric(df['demand'], errors='coerce').fillna(0).astype(int)
-            # 필수 좌표 결측 행 제거
-            df = df.dropna(subset=['id', 'lon', 'lat'])
-            # id는 정수로 캐스팅(가능 시)
-            try:
-                df['id'] = df['id'].astype(int)
-            except Exception:
-                pass
+            df['demand'] = pd.to_numeric(df['demand'], errors='coerce').fillna(0)
+
+            # 기본적인 결측/타입 검사: 필수 좌표가 없는 행은 오류로 처리
+            bad_coord = df[df['lon'].isna() | df['lat'].isna()]
+            if not bad_coord.empty:
+                rows = bad_coord.index.tolist()
+                return f'Invalid coordinates in rows: {rows}', 400
+
+            # 좌표 범위 체크
+            invalid_bounds = df[(df['lon'] < -180) | (df['lon'] > 180) | (df['lat'] < -90) | (df['lat'] > 90)]
+            if not invalid_bounds.empty:
+                return f'Latitude/longitude out of range for rows: {invalid_bounds.index.tolist()}', 400
+
+            # demand는 음수일 수 없음
+            if (df['demand'] < 0).any():
+                return f'Demand must be non-negative for all rows', 400
+
+            # id는 문자열로 정규화 (빈값은 빈 문자열)
+            df['id'] = df['id'].fillna('').astype(str).str.strip()
+
+            # 빈 id에 대해서는 4자리 대문자+숫자 ID를 생성
+            existing_ids = set(df['id'][df['id'] != ''].tolist())
+            new_ids = []
+            for idx, val in df['id'].items():
+                if not val:
+                    # 생성 시 충돌이 없을 때까지 재시도
+                    attempts = 0
+                    candidate = None
+                    while attempts < 20:
+                        candidate = generate_short_id(4)
+                        if candidate not in existing_ids:
+                            existing_ids.add(candidate)
+                            break
+                        attempts += 1
+                    if candidate is None:
+                        import uuid
+                        candidate = uuid.uuid4().hex[:4].upper()
+                    df.at[idx, 'id'] = candidate
+                    new_ids.append((idx, candidate))
+
+            # 중복 ID 검사
+            dupes = df[df['id'].duplicated(keep=False)]['id'].unique().tolist()
+            if dupes:
+                # 사용자가 이해하기 쉬운 한국어 메시지 반환
+                return f'업로드 실패: CSV에 중복된 ID가 존재합니다. 중복 ID: {dupes}', 400
+
+            # depot 보장: id '1'이 없다면 첫 행을 depot으로 설정
+            if '1' not in df['id'].values:
+                # first row를 depot으로 설정
+                df.iloc[0, df.columns.get_loc('id')] = '1'
+                df.iloc[0, df.columns.get_loc('demand')] = 0
+
+            # 모든 id를 문자열로 유지
+            df['id'] = df['id'].astype(str)
+
+            # demand를 정수로
+            df['demand'] = df['demand'].astype(int)
+
         except Exception as norm_e:
             print(f"업로드 데이터 정규화 오류: {norm_e}")
             return f'Failed to normalize uploaded CSV: {norm_e}', 400
@@ -1014,7 +1138,7 @@ def generate_standalone_route_html(route_data):
         }}
         
         function displayRoutes(routes) {{
-            const colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7'];
+            const colors = (window && window.ROUTE_COLORS) ? window.ROUTE_COLORS : ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7'];
             const bounds = new mapboxgl.LngLatBounds();
             
             routes.forEach((route, index) => {{
@@ -1096,26 +1220,59 @@ def get_routes():
                                 final_val = 0
                             final_load_by_vehicle[int(vid)] = final_val
                         # 캐시 데이터 보강: route_load, waypoint.demand
+                        def _normalize_name_local(s: str | None) -> str:
+                            if s is None:
+                                return ''
+                            try:
+                                return ' '.join(str(s).strip().lower().split())
+                            except Exception:
+                                return str(s).strip().lower()
+
                         for key, route in vehicle_routes.items():
                             vid = int(route.get('vehicle_id', key))
                             if 'route_load' not in route or route.get('route_load') in (None, 0):
                                 route['route_load'] = final_load_by_vehicle.get(vid, 0)
-                            # waypoint.demand 주입
+                            # waypoint.demand 주입 (ID 우선, 이름 폴백)
                             try:
                                 grp = routes_df[routes_df['Vehicle_ID'] == vid].sort_values('Stop_Order').copy()
-                                # name과 순서에 따라 매칭
                                 if 'waypoints' in route and isinstance(route['waypoints'], list):
                                     for idx, wp in enumerate(route['waypoints']):
-                                        # depot/waypoint 타입 추정 불가 시 이름만으로 매칭
                                         wp_name = str(wp.get('name', ''))
+                                        wp_id = str(wp.get('id', '')) if wp.get('id') is not None else None
+                                        wp_name_norm = _normalize_name_local(wp_name)
                                         load_val = 0
-                                        # idx는 0부터이지만 CSV는 1부터이므로 맞춰 시도
+                                        # 1) Location_ID 컬럼이 있으면 ID로 우선 매칭
+                                        if 'Location_ID' in grp.columns and wp_id:
+                                            matched = grp[grp['Location_ID'].astype(str) == wp_id]
+                                            if not matched.empty:
+                                                try:
+                                                    load_val = int(matched.iloc[0].get('Load', 0) or 0)
+                                                    wp['demand'] = load_val
+                                                    continue
+                                                except Exception:
+                                                    load_val = 0
+                                        # 2) 동일한 순서의 후보 사용(인덱스 기반)
                                         candidate = grp.iloc[idx] if idx < len(grp) else None
-                                        if candidate is not None and str(candidate.get('Location_Name', '')) == wp_name:
-                                            load_val = int(candidate.get('Load', 0) or 0)
-                                        else:
-                                            # 이름으로 첫 매치
-                                            matched = grp[grp['Location_Name'].astype(str) == wp_name]
+                                        if candidate is not None:
+                                            # ID가 있으면 비교
+                                            if 'Location_ID' in candidate and pd.notna(candidate.get('Location_ID')) and wp_id:
+                                                if str(candidate.get('Location_ID')) == wp_id:
+                                                    load_val = int(candidate.get('Load', 0) or 0)
+                                                    wp['demand'] = load_val
+                                                    continue
+                                            # 이름으로 비교 (정규화)
+                                            cand_name_norm = _normalize_name_local(candidate.get('Location_Name', ''))
+                                            if cand_name_norm and cand_name_norm == wp_name_norm:
+                                                load_val = int(candidate.get('Load', 0) or 0)
+                                                wp['demand'] = load_val
+                                                continue
+                                        # 3) 이름으로 전체 검색 폴백
+                                        if 'Location_Name' in grp.columns:
+                                            # normalized match across the group
+                                            try:
+                                                matched = grp[grp['Location_Name'].astype(str).apply(lambda x: _normalize_name_local(x) == wp_name_norm)]
+                                            except Exception:
+                                                matched = grp[grp['Location_Name'].astype(str) == wp_name]
                                             if not matched.empty:
                                                 try:
                                                     load_val = int(matched.iloc[0].get('Load', 0) or 0)
@@ -1224,20 +1381,40 @@ def generate_routes_from_csv_internal(options: dict | None = None):
         
         print(f"📊 Routes 데이터: {len(routes_df)}행, Locations 데이터: {len(locations_df)}행")
         
-        # 위치 정보를 딕셔너리로 변환 (빠른 조회를 위해)
-        location_dict = {}
+        # 위치 정보를 딕셔너리로 변환 (ID 우선 조회, name 폴백)
+        # location_by_id: id -> location dict
+        # location_by_name: name -> location dict (폴백용, 중복 시 첫 항목 사용)
+        location_by_id = {}
+        location_by_name = {}
+        def _normalize_name(s: str | None) -> str:
+            if s is None:
+                return ''
+            try:
+                # strip, lowercase, collapse whitespace
+                return ' '.join(str(s).strip().lower().split())
+            except Exception:
+                return str(s).strip().lower()
         for _, row in locations_df.iterrows():
             try:
-                location_dict[str(row['name'])] = {
-                    'name': str(row['name']),
+                loc_id = str(row['id']) if 'id' in row and row['id'] is not None else None
+                loc_name = str(row['name'])
+                loc_entry = {
+                    'id': loc_id,
+                    'name': loc_name,
                     'x': float(row['lon']),  # T-map API는 x=경도, y=위도
                     'y': float(row['lat'])
                 }
+                if loc_id:
+                    location_by_id[loc_id] = loc_entry
+                # name은 중복 가능성이 있으나 폴백 용도로 첫 매치만 사용
+                norm = _normalize_name(loc_name)
+                if norm and norm not in location_by_name:
+                    location_by_name[norm] = loc_entry
             except (ValueError, TypeError) as e:
-                print(f"위치 데이터 변환 오류: {row['name']} - {e}")
+                print(f"위치 데이터 변환 오류: {row.get('name', '')} - {e}")
                 continue
-                
-        print(f"📍 위치 딕셔너리 생성 완료: {len(location_dict)}개 위치")
+
+        print(f"📍 위치 딕셔너리 생성 완료: {len(location_by_id)}개 id, {len(location_by_name)}개 name(폴백)")
         
         # T-map 라우터 초기화
         tmap_router = TmapRoute()
@@ -1281,22 +1458,62 @@ def generate_routes_from_csv_internal(options: dict | None = None):
                     inferred_mode = 'DEPOT_START_OPEN_END'
                 elif str(start_row['Location_Type']) == 'waypoint' and str(end_row['Location_Type']) == 'depot':
                     inferred_mode = 'FREE_START_DEPOT_END'
+
+                # optimization_routes.csv에서 Location_ID 컬럼이 있으면 우선 사용
+                # start_row, end_row, via_names 객체에서 Location_ID가 있을 가능성 고려
+                def extract_id_from_row(row):
+                    if 'Location_ID' in row and pd.notna(row.get('Location_ID')):
+                        return str(row.get('Location_ID'))
+                    return None
+
+                start_id_candidate = extract_id_from_row(start_row)
+                end_id_candidate = extract_id_from_row(end_row)
+                via_id_candidates = [extract_id_from_row(r) for _, r in vehicle_data.iloc[1:-1].iterrows()]
+
+                # 위치 정보 확인 (ID 우선, name 폴백)
+                def exists_in_locations(id_or_name):
+                    if id_or_name is None:
+                        return False
+                    s = str(id_or_name)
+                    # ID exact match
+                    if s in location_by_id:
+                        return True
+                    # name normalized match
+                    if _normalize_name(s) in location_by_name:
+                        return True
+                    return False
+
+                if not exists_in_locations(start_id_candidate or start_name):
+                    print(f"Vehicle {vehicle_id}: 출발지 '{start_id_candidate or start_name}'을 찾을 수 없습니다.")
+                    continue
+                if not exists_in_locations(end_id_candidate or end_name):
+                    print(f"Vehicle {vehicle_id}: 도착지 '{end_id_candidate or end_name}'을 찾을 수 없습니다.")
+                    continue
+                missing = [n for i, n in enumerate(via_names) if not exists_in_locations(via_id_candidates[i] if i < len(via_id_candidates) else n)]
+                if missing:
+                    print(f"Vehicle {vehicle_id}: 경유지를 찾을 수 없습니다: {missing}")
+                    continue
                 
-                # 위치 정보 확인
-                if start_name not in location_dict:
-                    print(f"Vehicle {vehicle_id}: 출발지 '{start_name}'을 찾을 수 없습니다.")
-                    continue
-                if end_name not in location_dict:
-                    print(f"Vehicle {vehicle_id}: 도착지 '{end_name}'을 찾을 수 없습니다.")
-                    continue
-                if not all(name in location_dict for name in via_names):
-                    missing_names = [name for name in via_names if name not in location_dict]
-                    print(f"Vehicle {vehicle_id}: 경유지를 찾을 수 없습니다: {missing_names}")
-                    continue
-                
-                start_point = location_dict[start_name].copy()
-                end_point = location_dict[end_name].copy()
-                via_points = [location_dict[name].copy() for name in via_names]
+                # start/end/via를 ID 우선으로 찾고, 없으면 name 폴백
+                def resolve_location_by_id_or_name(name_or_id):
+                    # 우선 id로 검색
+                    if name_or_id is None:
+                        return None
+                    s = str(name_or_id)
+                    if s in location_by_id:
+                        return location_by_id[s].copy()
+                    norm = _normalize_name(s)
+                    if norm in location_by_name:
+                        return location_by_name[norm].copy()
+                    return None
+
+                start_point = resolve_location_by_id_or_name(start_id_candidate or start_name)
+                end_point = resolve_location_by_id_or_name(end_id_candidate or end_name)
+                via_points = []
+                for i, name in enumerate(via_names):
+                    candidate_id = via_id_candidates[i] if i < len(via_id_candidates) else None
+                    vp = resolve_location_by_id_or_name(candidate_id or name)
+                    via_points.append(vp)
                 # demand 주입: routes_df의 Load 값을 name 기준으로 매칭 (동일 이름 다회 출현 가능성 낮다고 가정)
                 try:
                     # name -> Load 매핑 리스트를 Stop_Order 순서로 뽑아냄
@@ -1484,4 +1701,5 @@ def check_route_cache():
         })
 
 if __name__ == '__main__':
-    app.run(debug=True,host='192.168.0.114', port=5000)
+    app.run(debug=True)
+    # app.run(debug=True,host='192.168.0.114', port=5000)

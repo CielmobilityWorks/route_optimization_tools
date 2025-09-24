@@ -1,10 +1,12 @@
 {
-  "vehicleCount": 3,
-  "vehicleCapacity": 40,
+  "vehicleCount": 4,
+  "vehicleCapacity": 10,
   "timeLimitSec": 60,
   "primaryObjective": "cost",
   "tiebreaker1": "distance",
   "tiebreaker2": "vehicles",
-  "additionalObjectives": [],
+  "additionalObjectives": [
+    "workloadBalance"
+  ],
   "routeMode": "FREE_START_DEPOT_END"
 }

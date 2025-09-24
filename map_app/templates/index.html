@@ -15,6 +15,10 @@
 </head>
 <body>
 
+    <script>
+        // 전역 차량/경로 색상 팔레트 (기본값 유지)
+        window.ROUTE_COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8', '#F7DC6F'];
+    </script>
 <div id='container'>
     <div id='map'></div>
     <div id='sidebar'>
@@ -34,7 +38,7 @@
             <form id="upload-form" method="post" enctype="multipart/form-data">
                 <input type="file" id="file-upload" name="file" accept=".csv" onchange="uploadFile()">
             </form>
-            <a href="/download" class="button">Download CSV</a>
+            <a id="download-csv-link" href="/download" class="button">Download CSV</a>
         </div>
         <div class="table-container">
             <table id='location-table'>
@@ -448,7 +452,23 @@
 <script>
 // 전체 화면 route visualization 열기
 function openFullRouteVisualization() {
-    const url = '/route-visualization';
+    // 우선 window.currentProjectId (main.js에서 노출)를 사용
+    let search = '';
+    try {
+        if (window.currentProjectId) {
+            search = '?projectId=' + encodeURIComponent(window.currentProjectId);
+        }
+    } catch (e) {}
+    // 그래도 없으면 현재 쿼리스트링을 사용
+    if (!search) search = window.location.search || '';
+    // 쿼리스트링이 없으면 cookie에서 projectId를 찾아 사용
+    if (!search) {
+        const m = document.cookie.match(/(?:^|; )projectId=([^;]+)/);
+        if (m && m[1]) {
+            search = '?projectId=' + encodeURIComponent(m[1]);
+        }
+    }
+    const url = '/route-visualization' + search;
     window.open(url, '_blank', 'width=1200,height=800');
 }
 </script>

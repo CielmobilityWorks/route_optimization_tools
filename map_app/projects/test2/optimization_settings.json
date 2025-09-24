@@ -1,0 +1,12 @@
+{
+  "vehicleCount": 4,
+  "vehicleCapacity": 15,
+  "timeLimitSec": 60,
+  "primaryObjective": "time",
+  "tiebreaker1": "makespan",
+  "tiebreaker2": "vehicles",
+  "additionalObjectives": [
+    "workloadBalance"
+  ],
+  "routeMode": "FREE_START_DEPOT_END"
+}

@@ -236,10 +236,42 @@
                     setTimeout(res, 200);
                 });
                 await waitStyleLoaded();
-                const resp = await fetch('/get-routes');
+
+                // projectId/querystring fallback helper
+                function _getQueryStringFallback() {
+                    // 1) current location.search
+                    if (window.location && window.location.search && window.location.search.length > 1) return window.location.search;
+                    // 2) cookie 'projectId'
+                    const m = document.cookie.match(/(?:^|; )projectId=([^;]+)/);
+                    if (m && m[1]) return '?projectId=' + encodeURIComponent(m[1]);
+                    // 3) opener's location.search (if opened via window.open)
+                    try {
+                        if (window.opener && window.opener.location && window.opener.location.search && window.opener.location.search.length > 1) {
+                            return window.opener.location.search;
+                        }
+                    } catch (e) {
+                        // cross-origin would throw, ignore
+                    }
+                    // 4) opener's cookie
+                    try {
+                        if (window.opener && window.opener.document && window.opener.document.cookie) {
+                            const mo = window.opener.document.cookie.match(/(?:^|; )projectId=([^;]+)/);
+                            if (mo && mo[1]) return '?projectId=' + encodeURIComponent(mo[1]);
+                        }
+                    } catch (e) {
+                        // ignore
+                    }
+                    return '';
+                }
+
+                const query = _getQueryStringFallback();
+                console.log('Full view requesting /get-routes with query:', query);
+                const resp = await fetch('/get-routes' + query);
                 const data = await resp.json();
                 if (data && data.success && typeof window.displayAndManageRoutes === 'function') {
                     window.displayAndManageRoutes(data.vehicle_routes, routeVisualizationMap);
+                } else {
+                    console.warn('Full view: get-routes returned no data or failed', data);
                 }
             } catch (e) {
                 console.error('Full view load error:', e);

@@ -3,6 +3,8 @@ mapboxgl.accessToken = window.MAPBOX_ACCESS_TOKEN;
 // 기본 프로젝트 ID 설정
 const DEFAULT_PROJECT_ID = 'default';
 let currentProjectId = DEFAULT_PROJECT_ID;
+// expose for other windows/scripts (index.html's openFullRouteVisualization relies on this)
+window.currentProjectId = currentProjectId;
 
 // fetch 래퍼: 쿼리에 projectId가 없으면 현재 프로젝트 ID를 자동으로 추가
 function withProjectId(input, init) {
@@ -27,6 +29,11 @@ const map = new mapboxgl.Map({
     center: [126.9779, 37.5547],
     zoom: 11
 });
+
+// Add Mapbox default controls (same as full view) - minimal, use built-in controls
+map.addControl(new mapboxgl.NavigationControl(), 'top-left');
+map.addControl(new mapboxgl.ScaleControl({ maxWidth: 80, unit: 'metric' }), 'bottom-left');
+map.addControl(new mapboxgl.FullscreenControl(), 'top-left');
 
 let markers = [];
 let lastDragEndedAt = 0; // 드래그 직후 클릭/맵클릭 무시용 타임스탬프(ms)
@@ -56,6 +63,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 .forEach(input => input.addEventListener('change', updateOptimizationPreview));
         }
     }, 100);
+
+    // no custom map controls: rely on Mapbox built-in controls (NavigationControl, ScaleControl, FullscreenControl)
 });
 
 // 프로젝트 선택/생성 UI 초기화
@@ -65,22 +74,25 @@ async function setupProjectUI() {
     if (!select) return;
 
     // 로컬 저장된 최근 프로젝트 사용
-    try {
-        const saved = window.localStorage.getItem('projectId');
-        if (saved) currentProjectId = saved;
-    } catch (_) {}
+        try {
+            const saved = window.localStorage.getItem('projectId');
+            if (saved) currentProjectId = saved;
+        } catch (_) {}
+        window.currentProjectId = currentProjectId;
 
     await refreshProjectList(select);
 
     // 선택 핸들러
     select.onchange = async () => {
-        const pid = select.value || DEFAULT_PROJECT_ID;
-        currentProjectId = pid;
+    const pid = select.value || DEFAULT_PROJECT_ID;
+    currentProjectId = pid;
+    window.currentProjectId = currentProjectId;
         try { window.localStorage.setItem('projectId', pid); } catch (_) {}
         // 프로젝트 전환 시 지도도 해당 프로젝트 위치에 맞춰 이동
         await fetchLocations({ fitMap: true });
         checkMatrixFileExists();
         checkRoutesFileExists();
+        updateDownloadLink();
     };
 
     if (createBtn) {
@@ -124,15 +136,36 @@ async function refreshProjectList(selectEl, selectId) {
             selectEl.appendChild(opt);
         });
         // 선택값 결정
-        const pid = selectId || currentProjectId || DEFAULT_PROJECT_ID;
-        selectEl.value = list.some(p => p.id === pid) ? pid : DEFAULT_PROJECT_ID;
-        currentProjectId = selectEl.value;
-        try { window.localStorage.setItem('projectId', currentProjectId); } catch (_) {}
+    const pid = selectId || currentProjectId || DEFAULT_PROJECT_ID;
+    selectEl.value = list.some(p => p.id === pid) ? pid : DEFAULT_PROJECT_ID;
+    currentProjectId = selectEl.value;
+    window.currentProjectId = currentProjectId;
+    try { window.localStorage.setItem('projectId', currentProjectId); } catch (_) {}
+        // update download link for the current project
+        try { updateDownloadLink(); } catch (_) {}
     } catch (e) {
         console.error('프로젝트 목록 로드 실패:', e);
         // 실패 시 기본만 유지
         selectEl.innerHTML = '<option value="default">default</option>';
-        currentProjectId = DEFAULT_PROJECT_ID;
+    currentProjectId = DEFAULT_PROJECT_ID;
+    window.currentProjectId = currentProjectId;
+    }
+}
+
+// Update download CSV link to include current projectId as query parameter
+function updateDownloadLink() {
+    try {
+        const link = document.getElementById('download-csv-link');
+        if (!link) return;
+        const pid = currentProjectId || DEFAULT_PROJECT_ID;
+        // Preserve existing query if any (but overwrite projectId)
+        const url = new URL(link.href, window.location.origin);
+        url.searchParams.set('projectId', pid);
+        link.href = url.pathname + url.search;
+    } catch (e) {
+        // fallback: simple assignment
+        const pid = currentProjectId || DEFAULT_PROJECT_ID;
+        try { document.getElementById('download-csv-link').href = `/download?projectId=${encodeURIComponent(pid)}`; } catch (_) {}
     }
 }
 
@@ -197,7 +230,7 @@ function updateTable(locations) {
         const displayId = isDepot ? 'depot' : truncatedIdStr;
         const rowClass = isDepot ? 'depot-row' : '';
         const idClass = isDepot ? 'depot-id' : '';
-        const deleteButton = isDepot ? '' : `<button onclick="deleteLocation(${loc.id}); event.stopPropagation();">Delete</button>`;
+    const deleteButton = isDepot ? '' : `<button onclick="deleteLocation('${loc.id}'); event.stopPropagation();">Delete</button>`;
         
         const row = `
             <tr class="${rowClass}" onclick="panToLocation(${loc.lon}, ${loc.lat})" style="cursor: pointer;">
@@ -207,7 +240,7 @@ function updateTable(locations) {
                 <td>${loc.lat.toFixed(2)}</td>
                 <td>${loc.demand}</td>
                 <td>
-                    <button onclick="editLocation(${loc.id}); event.stopPropagation();">Edit</button>
+                    <button onclick="editLocation('${loc.id}'); event.stopPropagation();">Edit</button>
                     ${deleteButton}
                 </td>
             </tr>
@@ -283,7 +316,7 @@ function updateMarkers(locations) {
         marker.getElement().addEventListener('mouseenter', () => marker.togglePopup());
         marker.getElement().addEventListener('mouseleave', () => marker.togglePopup());
 
-        marker.getElement().addEventListener('click', (e) => {
+    marker.getElement().addEventListener('click', (e) => {
             // 드래그 직후 클릭은 무시(자동 저장 후 편집 팝업이 뜨지 않게)
             if (Date.now() - lastDragEndedAt < 300) return;
             e.preventDefault();
@@ -319,7 +352,7 @@ function updateMarkers(locations) {
                 checkMatrixFileExists();
                 checkRoutesFileExists();
                 // Depot 이동 시 안내 토스트
-                if (loc.id === 1) {
+                if (String(loc.id) === '1') {
                     showToast('Depot 이동 시 매트릭스/경로가 초기화됩니다');
                 }
             } catch (e) {
@@ -350,7 +383,7 @@ function showToast(message, { timeout = 3000 } = {}) {
 function openPopup(data = {}) {
     const popup = document.getElementById('popup');
     const isNew = !data.id;
-    const isDepot = data.id === 1; // First location (ID=1) is depot
+    const isDepot = String(data.id) === '1'; // First location (ID=1) is depot (stored as '1' string)
     
     document.getElementById('popup-id').value = data.id || '';
     document.getElementById('popup-name').value = data.name || '';
