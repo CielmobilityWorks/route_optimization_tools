@@ -188,7 +188,10 @@ def save_matrices_to_csv(time_matrix, distance_matrix, location_names,
         return False
 
 
-def create_matrix_from_locations(transportMode="car", metric="Recommendation"):
+def create_matrix_from_locations(transportMode="car", metric="Recommendation",
+                                locations_file: str | None = None,
+                                time_filename: str | None = None,
+                                distance_filename: str | None = None):
     """
     locations.csv에서 데이터를 자동으로 불러와서 매트릭스를 생성하고 저장합니다.
     
@@ -200,8 +203,9 @@ def create_matrix_from_locations(transportMode="car", metric="Recommendation"):
         dict: {"success": bool, "message": str, "matrix": list, "locations": list}
     """
     try:
-        # locations.csv에서 데이터 로드
-        locations, location_names = load_locations_from_csv()
+        # locations.csv에서 데이터 로드 (경로 지정 가능)
+        locations_csv = locations_file or 'locations.csv'
+        locations, location_names = load_locations_from_csv(locations_csv)
         
         if not locations:
             return {"success": False, "message": "locations.csv 파일을 불러올 수 없습니다."}
@@ -218,7 +222,13 @@ def create_matrix_from_locations(transportMode="car", metric="Recommendation"):
         distance_matrix = matrix_result["distance_matrix"]
         
         # 결과를 CSV로 저장 (두 개의 파일로 분리 저장)
-        save_success = save_matrices_to_csv(time_matrix, distance_matrix, location_names)
+        save_success = save_matrices_to_csv(
+            time_matrix,
+            distance_matrix,
+            location_names,
+            time_filename=time_filename or 'time_matrix.csv',
+            distance_filename=distance_filename or 'distance_matrix.csv'
+        )
         
         if save_success:
             return {

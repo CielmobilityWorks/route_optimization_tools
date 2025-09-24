@@ -1,4 +1,4 @@
-from flask import Flask, render_template, jsonify, request, make_response
+from flask import Flask, render_template, jsonify, request, make_response, send_from_directory
 import pandas as pd
 import numpy as np
 import os
@@ -6,24 +6,143 @@ import io
 import json
 from utils.tmap_utils import create_matrix_from_locations
 from dotenv import load_dotenv
+from urllib.parse import urlencode, urlparse, parse_qs
 
 # 환경변수 로드
 load_dotenv()
 
 app = Flask(__name__)
 
-# 데이터 파일 경로
-DATA_FILE = 'locations.csv'
+# 프로젝트 기반 파일 경로 설정
+BASE_PROJECTS_DIR = 'projects'
 
-def load_data():
+def _sanitize_project_id(raw: str | None) -> str:
+    """프로젝트 ID를 파일 시스템에 안전하도록 정규화합니다."""
+    default_pid = 'default'
+    if not raw:
+        return default_pid
+    # 영숫자, 하이픈, 언더스코어만 허용하고 나머지는 제거
+    import re
+    pid = re.sub(r'[^A-Za-z0-9_-]', '', str(raw))[:50]
+    return pid if pid else default_pid
+
+def get_project_id() -> str:
+    """요청에서 projectId를 추출(쿼리/헤더/쿠키)하고 기본값은 'default'."""
+    try:
+        pid = request.args.get('projectId') or request.headers.get('X-Project-Id') or request.cookies.get('projectId')
+    except Exception:
+        pid = None
+    return _sanitize_project_id(pid)
+
+def ensure_project_dir(project_id: str) -> str:
+    """프로젝트 디렉터리를 보장하고 경로를 반환합니다."""
+    proj_dir = os.path.join(BASE_PROJECTS_DIR, project_id)
+    os.makedirs(proj_dir, exist_ok=True)
+    return proj_dir
+
+def project_path(filename: str, project_id: str | None = None) -> str:
+    """프로젝트 전용 파일 경로를 생성합니다."""
+    pid = project_id or get_project_id()
+    proj_dir = ensure_project_dir(pid)
+    return os.path.join(proj_dir, filename)
+
+def migrate_root_files_to_default():
+    """루트에 있는 기존 파일들을 projects/default로 이동(최초 1회).
+    이미 대상 경로에 있으면 이동하지 않음.
+    """
+    default_dir = ensure_project_dir('default')
+    candidates = [
+        'locations.csv',
+        'time_matrix.csv',
+        'distance_matrix.csv',
+        'optimization_routes.csv',
+        'optimization_summary.csv',
+        'generated_routes.json',
+        'route_metadata.json'
+    ]
+    for name in candidates:
+        src = os.path.join(os.getcwd(), name)
+        dst = os.path.join(default_dir, name)
+        try:
+            if os.path.exists(src) and not os.path.exists(dst):
+                # 이동(원자적 rename 시도, 다른 파티션이면 copy 후 remove)
+                try:
+                    os.replace(src, dst)
+                except Exception:
+                    import shutil
+                    shutil.copy2(src, dst)
+                    os.remove(src)
+                print(f"📦 Migrated '{name}' -> projects/default/{name}")
+        except Exception as e:
+            print(f"⚠️ Migration failed for {name}: {e}")
+
+# 앱 시작 시 마이그레이션 수행
+migrate_root_files_to_default()
+
+# 프로젝트 목록 조회/생성 API
+@app.route('/api/projects', methods=['GET'])
+def list_projects():
+    try:
+        # 기본 프로젝트 디렉터리 보장
+        ensure_project_dir('default')
+        projects = []
+        if not os.path.exists(BASE_PROJECTS_DIR):
+            os.makedirs(BASE_PROJECTS_DIR, exist_ok=True)
+        for name in os.listdir(BASE_PROJECTS_DIR):
+            proj_dir = os.path.join(BASE_PROJECTS_DIR, name)
+            if not os.path.isdir(proj_dir):
+                continue
+            loc_path = os.path.join(proj_dir, 'locations.csv')
+            has_locations = os.path.exists(loc_path)
+            count = 0
+            try:
+                if has_locations:
+                    df = pd.read_csv(loc_path, encoding='utf-8-sig')
+                    count = len(df)
+            except Exception:
+                pass
+            projects.append({
+                'id': name,
+                'has_locations': has_locations,
+                'location_count': int(count)
+            })
+        # 이름 기준 정렬(기본 default 우선)
+        projects.sort(key=lambda x: (x['id'] != 'default', x['id']))
+        return jsonify({'projects': projects})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/projects', methods=['POST'])
+def create_project():
+    try:
+        data = request.get_json(silent=True) or {}
+        raw_id = data.get('projectId') or data.get('id')
+        pid = _sanitize_project_id(raw_id)
+        if not pid:
+            return jsonify({'error': 'Invalid projectId'}), 400
+        proj_dir = os.path.join(BASE_PROJECTS_DIR, pid)
+        if os.path.exists(proj_dir):
+            return jsonify({'error': 'Project already exists'}), 409
+        os.makedirs(proj_dir, exist_ok=True)
+        # 초기 locations.csv 생성(Depot 1개)
+        df = pd.DataFrame([
+            {'id': 1, 'name': 'Depot', 'lon': 126.9779, 'lat': 37.5547, 'demand': 0}
+        ], columns=['id', 'name', 'lon', 'lat', 'demand'])
+        df.to_csv(os.path.join(proj_dir, 'locations.csv'), index=False, encoding='utf-8-sig')
+        return jsonify({'created': True, 'id': pid}), 201
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+def load_data(project_id: str | None = None):
     """CSV 파일에서 데이터를 로드합니다. 한글 인코딩을 자동으로 감지합니다."""
-    if os.path.exists(DATA_FILE):
+    locations_file = project_path('locations.csv', project_id)
+    if os.path.exists(locations_file):
         # 다양한 인코딩 시도
         encodings_to_try = ['utf-8', 'utf-8-sig', 'euc-kr', 'cp949']
         
         for encoding in encodings_to_try:
             try:
-                df = pd.read_csv(DATA_FILE, encoding=encoding)
+                df = pd.read_csv(locations_file, encoding=encoding)
                 print(f"CSV 파일을 {encoding} 인코딩으로 로드했습니다.")
                 return df
             except (UnicodeDecodeError, UnicodeError):
@@ -37,19 +156,21 @@ def load_data():
     
     return pd.DataFrame(columns=['id', 'name', 'lon', 'lat', 'demand'])
 
-def save_data(df):
+def save_data(df, project_id: str | None = None):
     """데이터를 CSV 파일에 저장합니다. UTF-8 인코딩으로 저장하여 한글 깨짐을 방지합니다."""
     try:
+        locations_file = project_path('locations.csv', project_id)
         # UTF-8 BOM과 함께 저장하여 Excel에서도 한글이 정상 표시되도록 함
-        df.to_csv(DATA_FILE, index=False, encoding='utf-8-sig')
+        df.to_csv(locations_file, index=False, encoding='utf-8-sig')
         print(f"데이터를 UTF-8-SIG 인코딩으로 저장했습니다.")
     except Exception as e:
         print(f"파일 저장 중 오류: {e}")
         # 실패 시 기본 인코딩으로 재시도
-        df.to_csv(DATA_FILE, index=False, encoding='utf-8')
+        df.to_csv(locations_file, index=False, encoding='utf-8')
 
-def save_optimization_result_to_csv(result, vehicle_count, vehicle_capacity):
+def save_optimization_result_to_csv(result, vehicle_count, vehicle_capacity, project_id: str | None = None):
     """최적화 결과를 CSV 파일로 저장합니다."""
+    pid = project_id or get_project_id()
     # 요약 정보
     summary_data = {
         'Total_Distance_m': [result['total_distance']],
@@ -63,11 +184,11 @@ def save_optimization_result_to_csv(result, vehicle_count, vehicle_capacity):
     # 요약 정보 CSV 저장 (UTF-8 BOM으로 Excel 호환성 확보)
     summary_df = pd.DataFrame(summary_data)
     try:
-        summary_df.to_csv('optimization_summary.csv', index=False, encoding='utf-8-sig')
+        summary_df.to_csv(project_path('optimization_summary.csv', pid), index=False, encoding='utf-8-sig')
         print("요약 파일을 UTF-8-SIG 인코딩으로 저장했습니다.")
     except Exception as e:
         print(f"요약 파일 저장 중 오류: {e}")
-        summary_df.to_csv('optimization_summary.csv', index=False, encoding='utf-8')
+        summary_df.to_csv(project_path('optimization_summary.csv', pid), index=False, encoding='utf-8')
     
     # 상세 경로 정보 CSV 저장 (UTF-8 BOM으로 Excel 호환성 확보)
     route_details = []
@@ -93,15 +214,15 @@ def save_optimization_result_to_csv(result, vehicle_count, vehicle_capacity):
     
     routes_df = pd.DataFrame(route_details)
     try:
-        routes_df.to_csv('optimization_routes.csv', index=False, encoding='utf-8-sig')
+        routes_df.to_csv(project_path('optimization_routes.csv', pid), index=False, encoding='utf-8-sig')
         print("상세 경로 파일을 UTF-8-SIG 인코딩으로 저장했습니다.")
     except Exception as e:
         print(f"상세 경로 파일 저장 중 오류: {e}")
-        routes_df.to_csv('optimization_routes.csv', index=False, encoding='utf-8')
+        routes_df.to_csv(project_path('optimization_routes.csv', pid), index=False, encoding='utf-8')
     
     print(f"최적화 결과가 저장되었습니다:")
-    print(f"- 요약: optimization_summary.csv")
-    print(f"- 상세 경로: optimization_routes.csv")
+    print(f"- 요약: {project_path('optimization_summary.csv', pid)}")
+    print(f"- 상세 경로: {project_path('optimization_routes.csv', pid)}")
 
 @app.route('/')
 def index():
@@ -112,7 +233,8 @@ def index():
 @app.route('/api/locations', methods=['GET'])
 def get_locations():
     """모든 위치 데이터를 JSON 형식으로 반환합니다."""
-    df = load_data()
+    pid = get_project_id()
+    df = load_data(pid)
     # CSV 파일에 작성된 순서 그대로 반환 (정렬하지 않음)
     return jsonify(df.to_dict(orient='records'))
 
@@ -121,7 +243,8 @@ def add_location():
     """새로운 위치를 추가합니다."""
     try:
         data = request.json
-        df = load_data()
+        pid = get_project_id()
+        df = load_data(pid)
         
         # 안전한 ID 생성
         if df.empty or df['id'].empty:
@@ -139,7 +262,7 @@ def add_location():
         }
         
         df = pd.concat([df, pd.DataFrame([new_location])], ignore_index=True)
-        save_data(df)
+        save_data(df, pid)
         return jsonify(new_location), 201
     except Exception as e:
         print(f"Error in add_location: {e}")
@@ -150,7 +273,8 @@ def update_location(location_id):
     """기존 위치 정보를 수정합니다."""
     try:
         data = request.json
-        df = load_data()
+        pid = get_project_id()
+        df = load_data(pid)
         
         if location_id in df['id'].values:
             idx = df[df['id'] == location_id].index[0]
@@ -178,7 +302,25 @@ def update_location(location_id):
                 except (ValueError, TypeError):
                     pass
             
-            save_data(df)
+            save_data(df, pid)
+
+            # 위치 변경에 따른 캐시/결과 파일 무효화 처리
+            try:
+                cache_files = [
+                    project_path('time_matrix.csv', pid),
+                    project_path('distance_matrix.csv', pid),
+                    project_path('optimization_routes.csv', pid),
+                    project_path('optimization_summary.csv', pid),
+                    project_path('generated_routes.json', pid),
+                    project_path('route_metadata.json', pid)
+                ]
+                for f in cache_files:
+                    if os.path.exists(f):
+                        os.remove(f)
+                        print(f"⚠️ 위치 변경으로 캐시/결과 파일 삭제: {f}")
+            except Exception as ce:
+                print(f"캐시 파일 삭제 실패(update_location): {ce}")
+
             return jsonify(df.loc[idx].to_dict())
         return jsonify({'error': 'Location not found'}), 404
     except Exception as e:
@@ -188,17 +330,52 @@ def update_location(location_id):
 @app.route('/api/locations/<int:location_id>', methods=['DELETE'])
 def delete_location(location_id):
     """위치를 삭제합니다."""
-    df = load_data()
+    pid = get_project_id()
+    df = load_data(pid)
     if location_id in df['id'].values:
         df = df[df['id'] != location_id]
-        save_data(df)
+        save_data(df, pid)
         return '', 204
     return jsonify({'error': 'Location not found'}), 404
+
+
+@app.route('/api/optimize-settings', methods=['GET'])
+def get_optimize_settings():
+    """프로젝트별 최적화 팝업 설정을 반환합니다. 설정 파일이 없으면 exists=False를 반환합니다."""
+    try:
+        pid = get_project_id()
+        settings_path = project_path('optimization_settings.json', pid)
+        if os.path.exists(settings_path):
+            try:
+                with open(settings_path, 'r', encoding='utf-8') as fh:
+                    data = json.load(fh)
+                return jsonify({'exists': True, 'settings': data})
+            except Exception as e:
+                return jsonify({'error': f'Failed to load settings: {e}'}), 500
+        return jsonify({'exists': False, 'settings': {}})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/optimize-settings', methods=['POST'])
+def save_optimize_settings():
+    """요청 바디(JSON)를 받아 프로젝트 폴더에 optimization_settings.json으로 저장합니다."""
+    try:
+        pid = get_project_id()
+        payload = request.get_json(silent=True) or {}
+        settings_path = project_path('optimization_settings.json', pid)
+        # 저장: UTF-8로 human-readable하게
+        with open(settings_path, 'w', encoding='utf-8') as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+        return jsonify({'saved': True}), 201
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/download')
 def download_file():
     """CSV 파일을 다운로드합니다. UTF-8 BOM으로 인코딩하여 Excel에서도 한글이 정상 표시됩니다."""
-    df = load_data()
+    pid = get_project_id()
+    df = load_data(pid)
     
     # UTF-8 BOM으로 인코딩된 CSV 생성
     output = io.StringIO()
@@ -213,6 +390,16 @@ def download_file():
     response.headers["Content-type"] = "text/csv; charset=utf-8-sig"
     return response
 
+@app.route('/download-demand-form')
+def download_demand_form():
+    """apps 폴더에 있는 demand_form.csv를 다운로드합니다."""
+    try:
+        # 앱 루트 기준 파일 제공
+        directory = os.path.abspath(os.path.dirname(__file__))
+        return send_from_directory(directory, 'demand_form.csv', as_attachment=True, download_name='demand_form.csv')
+    except Exception as e:
+        return jsonify({ 'error': f'Failed to download form: {str(e)}' }), 500
+
 @app.route('/upload', methods=['POST'])
 def upload_file():
     """CSV 파일을 업로드합니다."""
@@ -222,6 +409,7 @@ def upload_file():
     if file.filename == '':
         return 'No selected file', 400
     if file and file.filename.endswith('.csv'):
+        pid = get_project_id()
         # 업로드된 파일의 인코딩을 자동 감지하여 읽기
         encodings_to_try = ['utf-8', 'utf-8-sig', 'euc-kr', 'cp949']
         df = None
@@ -280,16 +468,16 @@ def upload_file():
             return f'Failed to normalize uploaded CSV: {norm_e}', 400
 
         # 저장
-        save_data(df)
+        save_data(df, pid)
 
         # 업로드로 인해 이전 계산/캐시 파일 무효화(데이터 일관성)
         cache_files = [
-            'time_matrix.csv',
-            'distance_matrix.csv',
-            'optimization_routes.csv',
-            'optimization_summary.csv',
-            'generated_routes.json',
-            'route_metadata.json'
+            project_path('time_matrix.csv', pid),
+            project_path('distance_matrix.csv', pid),
+            project_path('optimization_routes.csv', pid),
+            project_path('optimization_summary.csv', pid),
+            project_path('generated_routes.json', pid),
+            project_path('route_metadata.json', pid)
         ]
         cleared = []
         for f in cache_files:
@@ -312,9 +500,16 @@ def create_matrix():
         data = request.json
         transport_mode = data.get('transportMode', 'car')
         metric = data.get('metric', 'Recommendation')
+        pid = get_project_id()
         
         # 매트릭스 생성
-        result = create_matrix_from_locations(transport_mode, metric)
+        result = create_matrix_from_locations(
+            transport_mode,
+            metric,
+            locations_file=project_path('locations.csv', pid),
+            time_filename=project_path('time_matrix.csv', pid),
+            distance_filename=project_path('distance_matrix.csv', pid)
+        )
         
         if result['success']:
             return jsonify({
@@ -339,8 +534,9 @@ def create_matrix():
 @app.route('/api/check-matrix-file', methods=['GET'])
 def check_matrix_file():
     """시간 및 거리 매트릭스 파일 존재 여부를 확인합니다."""
-    time_matrix_file = 'time_matrix.csv'
-    distance_matrix_file = 'distance_matrix.csv'
+    pid = get_project_id()
+    time_matrix_file = project_path('time_matrix.csv', pid)
+    distance_matrix_file = project_path('distance_matrix.csv', pid)
     
     # 두 파일 모두 존재해야 함
     exists = os.path.exists(time_matrix_file) and os.path.exists(distance_matrix_file)
@@ -356,9 +552,10 @@ def optimize():
     """최적화를 실행합니다."""
     try:
         from utils.vrp_solver import solve_vrp
+        pid = get_project_id()
         
         # 🗑️ 기존 경로 캐시 파일 삭제 (새로운 최적화 시작)
-        route_cache_files = ['generated_routes.json', 'route_metadata.json']
+        route_cache_files = [project_path('generated_routes.json', pid), project_path('route_metadata.json', pid)]
         for cache_file in route_cache_files:
             if os.path.exists(cache_file):
                 try:
@@ -379,8 +576,8 @@ def optimize():
         additional_objectives = data.get('additionalObjectives', [])
         
         # 매트릭스 파일 존재 여부 확인
-        time_matrix_file = 'time_matrix.csv'
-        distance_matrix_file = 'distance_matrix.csv'
+        time_matrix_file = project_path('time_matrix.csv', pid)
+        distance_matrix_file = project_path('distance_matrix.csv', pid)
         
         if not os.path.exists(time_matrix_file):
             return jsonify({
@@ -395,7 +592,7 @@ def optimize():
             }), 400
         
         # locations.csv 파일이 존재하는지 확인
-        locations_file = 'locations.csv'
+        locations_file = project_path('locations.csv', pid)
         if not os.path.exists(locations_file):
             return jsonify({
                 'success': False,
@@ -438,7 +635,7 @@ def optimize():
         
         if result['success']:
             # CSV 파일로 최적화 결과 저장
-            save_optimization_result_to_csv(result, vehicle_count, vehicle_capacity)
+            save_optimization_result_to_csv(result, vehicle_count, vehicle_capacity, pid)
             
             return jsonify({
                 'success': True,
@@ -483,8 +680,9 @@ def optimize():
 @app.route('/api/check-routes', methods=['GET'])
 def check_routes():
     """optimization_routes.csv와 locations.csv 파일의 존재를 확인합니다."""
-    routes_file = 'optimization_routes.csv'
-    locations_file = 'locations.csv'
+    pid = get_project_id()
+    routes_file = project_path('optimization_routes.csv', pid)
+    locations_file = project_path('locations.csv', pid)
     
     try:
         # Routes 파일 존재 확인
@@ -529,12 +727,12 @@ def check_routes():
 
 # Route Visualization 관련 라우트들
 from datetime import datetime
-from flask import send_file
 from utils.tmap_route import TmapRoute
 
 @app.route('/route-visualization')
 def route_visualization():
     """독립적인 route visualization 페이지"""
+    pid = get_project_id()
     # 기존 최적화 결과가 있으면 로드
     route_data = {
         'routes': [],
@@ -546,9 +744,9 @@ def route_visualization():
     
     # optimization_routes.csv 파일이 있으면 데이터 로드
     try:
-        if os.path.exists('optimization_routes.csv'):
-            routes_df = pd.read_csv('optimization_routes.csv', encoding='utf-8-sig')
-            route_data = convert_routes_df_to_visualization_data(routes_df)
+        if os.path.exists(project_path('optimization_routes.csv', pid)):
+            routes_df = pd.read_csv(project_path('optimization_routes.csv', pid), encoding='utf-8-sig')
+            route_data = convert_routes_df_to_visualization_data(routes_df, pid)
     except Exception as e:
         print(f"Route data loading error: {e}")
     
@@ -562,6 +760,7 @@ def route_visualization():
 def generate_route_html():
     """라우트 데이터를 받아서 완전한 HTML 파일을 생성"""
     try:
+        pid = get_project_id()
         request_data = request.get_json()
         
         # 현재 최적화 결과 로드
@@ -573,9 +772,9 @@ def generate_route_html():
             'optimization_score': 'N/A'
         }
         
-        if os.path.exists('optimization_routes.csv'):
-            routes_df = pd.read_csv('optimization_routes.csv', encoding='utf-8-sig')
-            route_data = convert_routes_df_to_visualization_data(routes_df)
+        if os.path.exists(project_path('optimization_routes.csv', pid)):
+            routes_df = pd.read_csv(project_path('optimization_routes.csv', pid), encoding='utf-8-sig')
+            route_data = convert_routes_df_to_visualization_data(routes_df, pid)
         
         # 독립적인 HTML 생성 (외부 의존성 없이)
         html_content = generate_standalone_route_html(route_data)
@@ -593,7 +792,7 @@ def generate_route_html():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-def convert_routes_df_to_visualization_data(routes_df):
+def convert_routes_df_to_visualization_data(routes_df, pid: str | None = None):
     """최적화 결과 DataFrame을 visualization용 데이터로 변환"""
     route_data = {
         'routes': [],
@@ -632,8 +831,11 @@ def convert_routes_df_to_visualization_data(routes_df):
                 route_data['routes'].append(route_info)
         
         # 통계 정보 계산 (요약 파일이 있으면)
-        if os.path.exists('optimization_summary.csv'):
-            summary_df = pd.read_csv('optimization_summary.csv', encoding='utf-8-sig')
+        if pid is None:
+            pid = 'default'
+        summary_file = project_path('optimization_summary.csv', pid)
+        if os.path.exists(summary_file):
+            summary_df = pd.read_csv(summary_file, encoding='utf-8-sig')
             if not summary_df.empty:
                 total_dist = summary_df.get('Total_Distance_m', [0]).iloc[0]
                 route_data['total_distance'] = f"{total_dist/1000:.1f} km" if total_dist > 0 else 'N/A'
@@ -850,18 +1052,19 @@ def generate_standalone_route_html(route_data):
 def get_routes():
     """스마트 경로 로딩: 캐시된 데이터가 있으면 바로 반환, 없으면 생성"""
     try:
+        pid = get_project_id()
         # 1️⃣ 캐시된 경로 파일 확인
-        if os.path.exists('generated_routes.json'):
+        if os.path.exists(project_path('generated_routes.json', pid)):
             print("📂 캐시된 경로 데이터 발견, 로딩 중...")
             
             try:
-                with open('generated_routes.json', 'r', encoding='utf-8') as f:
+                with open(project_path('generated_routes.json', pid), 'r', encoding='utf-8') as f:
                     cached_data = json.load(f)
                 # 캐시된 vehicle_routes에 route_load나 waypoint.demand가 없을 수 있으므로 보강
                 vehicle_routes = cached_data.get('vehicle_routes', {})
                 try:
-                    if os.path.exists('optimization_routes.csv'):
-                        routes_df = pd.read_csv('optimization_routes.csv', encoding='utf-8-sig')
+                    if os.path.exists(project_path('optimization_routes.csv', pid)):
+                        routes_df = pd.read_csv(project_path('optimization_routes.csv', pid), encoding='utf-8-sig')
                         routes_df['Vehicle_ID'] = pd.to_numeric(routes_df['Vehicle_ID'], errors='coerce')
                         routes_df['Stop_Order'] = pd.to_numeric(routes_df['Stop_Order'], errors='coerce')
                         routes_df = routes_df.dropna(subset=['Vehicle_ID', 'Stop_Order'])
@@ -961,6 +1164,7 @@ def generate_routes_from_csv():
 def generate_routes_from_csv_internal(options: dict | None = None):
     """optimization_routes.csv 파일을 읽어서 T-map으로 실제 경로 생성"""
     try:
+        pid = get_project_id()
         options = options or {}
         # 문자열로 보장
         opt_search = options.get('searchOption')
@@ -979,16 +1183,16 @@ def generate_routes_from_csv_internal(options: dict | None = None):
         print("🚀 경로 생성 시작...")
         
         # CSV 파일들 읽기
-        if not os.path.exists('optimization_routes.csv'):
+        if not os.path.exists(project_path('optimization_routes.csv', pid)):
             return jsonify({'error': 'optimization_routes.csv 파일이 없습니다.'}), 400
         
-        if not os.path.exists('locations.csv'):
+        if not os.path.exists(project_path('locations.csv', pid)):
             return jsonify({'error': 'locations.csv 파일이 없습니다.'}), 400
             
         print("📁 CSV 파일 읽기 중...")
 
-        routes_df = pd.read_csv('optimization_routes.csv', encoding='utf-8-sig')
-        locations_df = pd.read_csv('locations.csv', encoding='utf-8-sig')
+        routes_df = pd.read_csv(project_path('optimization_routes.csv', pid), encoding='utf-8-sig')
+        locations_df = pd.read_csv(project_path('locations.csv', pid), encoding='utf-8-sig')
         
         # 데이터 타입 강제 변환
         routes_df['Vehicle_ID'] = pd.to_numeric(routes_df['Vehicle_ID'], errors='coerce')
@@ -1224,7 +1428,7 @@ def generate_routes_from_csv_internal(options: dict | None = None):
                 'inferred_route_mode': inferred_mode if 'inferred_mode' in locals() else 'unknown'
             }
             
-            with open('generated_routes.json', 'w', encoding='utf-8') as f:
+            with open(project_path('generated_routes.json', pid), 'w', encoding='utf-8') as f:
                 json.dump(cache_data, f, ensure_ascii=False, indent=2)
             
             # 메타데이터 저장
@@ -1235,10 +1439,10 @@ def generate_routes_from_csv_internal(options: dict | None = None):
                 'total_time_s': total_time
             }
             
-            with open('route_metadata.json', 'w', encoding='utf-8') as f:
+            with open(project_path('route_metadata.json', pid), 'w', encoding='utf-8') as f:
                 json.dump(metadata, f, ensure_ascii=False, indent=2)
                 
-            print(f"💾 경로 데이터 저장 완료: generated_routes.json")
+            print(f"💾 경로 데이터 저장 완료: {project_path('generated_routes.json', pid)}")
             
         except Exception as save_error:
             print(f"⚠️ 경로 데이터 저장 실패: {save_error}")
@@ -1255,9 +1459,10 @@ def generate_routes_from_csv_internal(options: dict | None = None):
 def check_route_cache():
     """경로 캐시 상태 확인"""
     try:
-        if os.path.exists('generated_routes.json') and os.path.exists('route_metadata.json'):
+        pid = get_project_id()
+        if os.path.exists(project_path('generated_routes.json', pid)) and os.path.exists(project_path('route_metadata.json', pid)):
             # 메타데이터에서 생성 시간 확인
-            with open('route_metadata.json', 'r', encoding='utf-8') as f:
+            with open(project_path('route_metadata.json', pid), 'r', encoding='utf-8') as f:
                 metadata = json.load(f)
             
             return jsonify({

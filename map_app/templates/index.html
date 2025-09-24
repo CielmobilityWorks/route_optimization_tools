@@ -19,9 +19,15 @@
     <div id='map'></div>
     <div id='sidebar'>
         <div class="sidebar-header">
-            <h2>Locations</h2>
-            <div class="location-count">
-                <span id="location-counter">Total: 0</span>
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; width:100%">
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <label for="project-select" style="font-weight:600;">Project</label>
+                    <select id="project-select" style="min-width:160px;"></select>
+                    <button id="project-create-button" class="button" style="padding:6px 10px;">+ New</button>
+                </div>
+                <div class="location-count">
+                    <a href="/download-demand-form" class="button" style="margin-left:8px;" title="수요 양식 CSV 다운로드">양식 다운로드</a>
+                </div>
             </div>
         </div>
         <div class="file-io">
@@ -48,6 +54,11 @@
             </table>
         </div>
         
+        <!-- Location Summary -->
+        <div class="location-summary" style="margin: 3px 0; padding: 2px; background: #f8f9fa; border-radius: 4px; text-align: right; font-size: 10px;">
+            <span id="location-counter">Locations: 0 | Total Demand: 0</span>
+        </div>
+        
         <!-- 사이드바 하단 버튼 영역 -->
         <div class="sidebar-buttons">
             <div id="create-matrix-btn">
@@ -64,6 +75,9 @@
         </div>
     </div>
 </div>
+
+<!-- Toast container -->
+<div id="toast-container" class="toast-container" aria-live="polite" aria-atomic="true"></div>
 
 <!-- Popup for adding/editing data -->
 <div id="popup" class="popup-hidden">
@@ -340,13 +354,16 @@
                 <button id="route-refresh-button" onclick="refreshRoutes()" title="T-map API로 새로운 경로 생성">
                     Refresh Routes
                 </button>
+                <button id="route-full-view-button" onclick="openFullRouteVisualization()" title="전체 화면으로 경로 보기">
+                    Full View
+                </button>
                 <button class="route-modal-close" onclick="closeRouteViewModal()">&times;</button>
             </div>
         </div>
         <div class="route-modal-body">
             <div id="route-map" class="route-map-container"></div>
             <!-- 지도 위 오버레이 정보 패널 -->
-            <div id="route-info-overlay" class="route-info-overlay">
+            <div id="route-info-overlay" class="route-info-overlay" style="top: 16px; right: 16px; bottom: auto;">
                 <div class="route-info-header">
                     <h4>Route Information</h4>
                     <button type="button" class="route-info-toggle" aria-expanded="true" title="접기/펼치기">
@@ -429,88 +446,10 @@
 
 <!-- HTML 내보내기 버튼 추가 -->
 <script>
-// 기존 팝업에 HTML 내보내기 기능 추가
-function addExportButtons() {
-    const modalBody = document.querySelector('.route-modal-body');
-    if (modalBody && !document.getElementById('export-controls')) {
-        const exportDiv = document.createElement('div');
-        exportDiv.id = 'export-controls';
-        exportDiv.style.cssText = 'position: absolute; top: 10px; right: 10px; z-index: 1000; display: flex; gap: 5px;';
-        
-        const openFullBtn = document.createElement('button');
-        openFullBtn.innerHTML = '🔗 Full View';
-        openFullBtn.style.cssText = 'padding: 5px 10px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;';
-        openFullBtn.onclick = () => openFullRouteVisualization();
-        
-        const saveHtmlBtn = document.createElement('button');
-        saveHtmlBtn.innerHTML = '💾 Save HTML';
-        saveHtmlBtn.style.cssText = 'padding: 5px 10px; background: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;';
-        saveHtmlBtn.onclick = () => generateAndSaveRouteHtml();
-        
-        exportDiv.appendChild(openFullBtn);
-        exportDiv.appendChild(saveHtmlBtn);
-        modalBody.style.position = 'relative';
-        modalBody.appendChild(exportDiv);
-    }
-}
-
 // 전체 화면 route visualization 열기
 function openFullRouteVisualization() {
     const url = '/route-visualization';
     window.open(url, '_blank', 'width=1200,height=800');
-}
-
-// Route HTML 생성 및 저장
-function generateAndSaveRouteHtml() {
-    // 현재 optimization 결과 데이터 수집
-    const routeData = collectCurrentRouteData();
-    
-    fetch('/generate-route-html', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(routeData)
-    })
-    .then(response => response.blob())
-    .then(blob => {
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `route_visualization_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.html`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-    })
-    .catch(error => {
-        console.error('Error generating route HTML:', error);
-        alert('HTML 생성 중 오류가 발생했습니다.');
-    });
-}
-
-// 현재 라우트 데이터 수집 (실제 optimization 결과에서)
-function collectCurrentRouteData() {
-    // 이 함수는 실제 optimization 결과 데이터 구조에 맞게 수정 필요
-    return {
-        routes: [], // 실제 route 데이터
-        statistics: {
-            total_distance: '0 km',
-            total_duration: '0 min',
-            route_count: 0,
-            optimization_score: '0%'
-        },
-        timestamp: new Date().toISOString()
-    };
-}
-
-// 팝업이 열릴 때 export 버튼 추가
-const originalOpenRouteViewModal = window.openRouteViewModal;
-if (typeof originalOpenRouteViewModal === 'function') {
-    window.openRouteViewModal = function() {
-        originalOpenRouteViewModal();
-        setTimeout(addExportButtons, 500);
-    };
 }
 </script>
 

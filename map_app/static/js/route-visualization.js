@@ -76,17 +76,10 @@ function initializeStandaloneRouteMap() {
         routeVisualizationMap.on('load', () => {
             console.log('Standalone route map initialized successfully');
             
-            // 네비게이션 컨트롤 추가
-            routeVisualizationMap.addControl(new mapboxgl.NavigationControl());
-            
-            // 스케일 컨트롤 추가
-            routeVisualizationMap.addControl(new mapboxgl.ScaleControl({
-                maxWidth: 80,
-                unit: 'metric'
-            }));
-            
-            // 풀스크린 컨트롤 추가
-            routeVisualizationMap.addControl(new mapboxgl.FullscreenControl());
+            // 컨트롤 좌측 배치
+            routeVisualizationMap.addControl(new mapboxgl.NavigationControl(), 'top-left');
+            routeVisualizationMap.addControl(new mapboxgl.ScaleControl({ maxWidth: 80, unit: 'metric' }), 'bottom-left');
+            routeVisualizationMap.addControl(new mapboxgl.FullscreenControl(), 'top-left');
         });
 
         // 에러 핸들링

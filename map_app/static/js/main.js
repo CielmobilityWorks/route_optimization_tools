@@ -1,5 +1,26 @@
 mapboxgl.accessToken = window.MAPBOX_ACCESS_TOKEN;
 
+// 기본 프로젝트 ID 설정
+const DEFAULT_PROJECT_ID = 'default';
+let currentProjectId = DEFAULT_PROJECT_ID;
+
+// fetch 래퍼: 쿼리에 projectId가 없으면 현재 프로젝트 ID를 자동으로 추가
+function withProjectId(input, init) {
+    try {
+        const url = typeof input === 'string' ? input : (input && input.url ? input.url : '');
+        if (!url) return fetch(input, init);
+        const hasQuery = url.includes('?');
+        const hasPid = /[?&]projectId=/.test(url) || (init && init.headers && init.headers['X-Project-Id']);
+        if (hasPid) return fetch(input, init);
+        const sep = hasQuery ? '&' : '?';
+        const pid = currentProjectId || DEFAULT_PROJECT_ID;
+        const urlWithPid = `${url}${sep}projectId=${encodeURIComponent(pid)}`;
+        return fetch(urlWithPid, init);
+    } catch (_) {
+        return fetch(input, init);
+    }
+}
+
 const map = new mapboxgl.Map({
     container: 'map',
     style: 'mapbox://styles/mapbox/light-v11',
@@ -8,22 +29,116 @@ const map = new mapboxgl.Map({
 });
 
 let markers = [];
-let currentPopup = null;
 let lastDragEndedAt = 0; // 드래그 직후 클릭/맵클릭 무시용 타임스탬프(ms)
+// 마지막 드래그 이동 실행취소(1회)용 상태
+let lastDragUndo = null; // { id, from: {lon,lat}, to: {lon,lat}, used: false, at: timestamp }
 
 document.addEventListener('DOMContentLoaded', () => {
+    // 프로젝트 UI 및 초기 데이터 로드
+    setupProjectUI();
     initializeApp();
+
+    // 기본 UI 상태 초기화
     closePopup();
     checkMatrixFileExists();
     checkRoutesFileExists();
+    if (typeof checkRouteStatus === 'function') {
+        checkRouteStatus();
+    }
     setupKeyboardEvents();
-    // Initialize counter
-    updateLocationCounter(0);
+    updateLocationCounter([]);
+
+    // 최적화 미리보기 리스너 바인딩(렌더 직후 약간 지연)
+    setTimeout(() => {
+        if (document.querySelector('input[name="primaryObjective"]')) {
+            updateOptimizationPreview();
+            document.querySelectorAll('input[name="primaryObjective"], input[name="tiebreaker1"], input[name="tiebreaker2"], input[name="additionalObjectives"]')
+                .forEach(input => input.addEventListener('change', updateOptimizationPreview));
+        }
+    }, 100);
 });
+
+// 프로젝트 선택/생성 UI 초기화
+async function setupProjectUI() {
+    const select = document.getElementById('project-select');
+    const createBtn = document.getElementById('project-create-button');
+    if (!select) return;
+
+    // 로컬 저장된 최근 프로젝트 사용
+    try {
+        const saved = window.localStorage.getItem('projectId');
+        if (saved) currentProjectId = saved;
+    } catch (_) {}
+
+    await refreshProjectList(select);
+
+    // 선택 핸들러
+    select.onchange = async () => {
+        const pid = select.value || DEFAULT_PROJECT_ID;
+        currentProjectId = pid;
+        try { window.localStorage.setItem('projectId', pid); } catch (_) {}
+        // 프로젝트 전환 시 지도도 해당 프로젝트 위치에 맞춰 이동
+        await fetchLocations({ fitMap: true });
+        checkMatrixFileExists();
+        checkRoutesFileExists();
+    };
+
+    if (createBtn) {
+        createBtn.onclick = async () => {
+            const name = prompt('새 프로젝트 이름을 입력하세요 (영문/숫자/-/_ 만 허용)');
+            if (!name) return;
+            try {
+                const resp = await fetch('/api/projects', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ projectId: name })
+                });
+                const data = await resp.json().catch(() => ({}));
+                if (!resp.ok) {
+                    throw new Error(data.error || '프로젝트 생성 실패');
+                }
+                // 리스트 갱신 후 새 프로젝트로 전환
+                await refreshProjectList(select, data.id);
+                select.dispatchEvent(new Event('change'));
+                alert('프로젝트가 생성되었습니다. 초기 Depot 1개가 추가되었습니다.');
+            } catch (e) {
+                alert(e.message || '프로젝트 생성 중 오류');
+            }
+        };
+    }
+}
+
+// 프로젝트 목록 로드 및 드롭다운 갱신
+async function refreshProjectList(selectEl, selectId) {
+    try {
+        const resp = await fetch('/api/projects');
+        const data = await resp.json();
+        const list = (data && data.projects) ? data.projects : [{ id: DEFAULT_PROJECT_ID }];
+        // 옵션 갱신
+        selectEl.innerHTML = '';
+        list.forEach(p => {
+            const opt = document.createElement('option');
+            opt.value = p.id;
+            const count = typeof p.location_count === 'number' ? ` (${p.location_count})` : '';
+            opt.textContent = p.id + count;
+            selectEl.appendChild(opt);
+        });
+        // 선택값 결정
+        const pid = selectId || currentProjectId || DEFAULT_PROJECT_ID;
+        selectEl.value = list.some(p => p.id === pid) ? pid : DEFAULT_PROJECT_ID;
+        currentProjectId = selectEl.value;
+        try { window.localStorage.setItem('projectId', currentProjectId); } catch (_) {}
+    } catch (e) {
+        console.error('프로젝트 목록 로드 실패:', e);
+        // 실패 시 기본만 유지
+        selectEl.innerHTML = '<option value="default">default</option>';
+        currentProjectId = DEFAULT_PROJECT_ID;
+    }
+}
 
 async function initializeApp() {
     try {
-        const response = await fetch('/api/locations');
+    const response = await withProjectId('/api/locations');
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({ error: 'Failed to load data.' }));
             throw new Error(errorData.error);
@@ -51,9 +166,10 @@ map.on('click', (e) => {
     openPopup({ lon: lng, lat: lat });
 });
 
-async function fetchLocations() {
+async function fetchLocations(options = {}) {
+    const { fitMap = false } = options;
     try {
-        const response = await fetch('/api/locations');
+    const response = await withProjectId('/api/locations');
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({ error: 'Failed to load data.' }));
             throw new Error(errorData.error);
@@ -61,6 +177,9 @@ async function fetchLocations() {
         const data = await response.json();
         updateTable(data);
         updateMarkers(data);
+        if (fitMap && data && data.length > 0) {
+            fitMapToLocations(data);
+        }
     } catch (error) {
         console.error('Could not fetch locations:', error);
         alert(error.message);
@@ -97,13 +216,15 @@ function updateTable(locations) {
     });
     
     // Update location counter
-    updateLocationCounter(locations.length);
+    updateLocationCounter(locations);
 }
 
-function updateLocationCounter(count) {
+function updateLocationCounter(locations) {
     const counter = document.getElementById('location-counter');
     if (counter) {
-        counter.textContent = `Total: ${count}`;
+        const count = locations.length;
+        const totalDemand = locations.reduce((sum, loc) => sum + (loc.demand || 0), 0);
+        counter.textContent = `Locations: ${count} | Total Demand: ${totalDemand}`;
     }
 }
 
@@ -154,7 +275,7 @@ function updateMarkers(locations) {
             anchor: 'bottom'
         }).setText(loc.name);
 
-        const marker = new mapboxgl.Marker({ element: el, draggable: !isDepot })
+        const marker = new mapboxgl.Marker({ element: el, draggable: true })
             .setLngLat([loc.lon, loc.lat])
             .setPopup(popup)
             .addTo(map);
@@ -169,35 +290,61 @@ function updateMarkers(locations) {
             editLocation(loc.id);
         });
         
-        // 드래그 앤 드롭으로 좌표 업데이트 (Depot은 드래그 불가)
-        if (!isDepot) {
-            const original = { lon: loc.lon, lat: loc.lat };
-            marker.on('dragend', async () => {
-                const p = marker.getLngLat();
-                // 드래그 종료 타임스탬프 기록(직후 클릭 무시)
-                lastDragEndedAt = Date.now();
-                try {
-                    const resp = await fetch(`/api/locations/${loc.id}` ,{
-                        method: 'PUT',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ lon: p.lng, lat: p.lat })
-                    });
-                    if (!resp.ok) {
-                        const err = await resp.json().catch(() => ({}));
-                        throw new Error(err.error || '좌표 업데이트 실패');
-                    }
-                    await fetchLocations();
-                } catch (e) {
-                    console.error('좌표 업데이트 실패:', e);
-                    alert('위치 업데이트 중 오류가 발생했습니다.');
-                    // 실패 시 원래 좌표로 되돌림
-                    marker.setLngLat([original.lon, original.lat]);
+        // 드래그 앤 드롭으로 좌표 업데이트 (Depot 포함)
+        const original = { lon: loc.lon, lat: loc.lat };
+        marker.on('dragend', async () => {
+            const p = marker.getLngLat();
+            // 드래그 종료 타임스탬프 기록(직후 클릭 무시)
+            lastDragEndedAt = Date.now();
+            try {
+                const resp = await withProjectId(`/api/locations/${loc.id}` ,{
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ lon: p.lng, lat: p.lat })
+                });
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    throw new Error(err.error || '좌표 업데이트 실패');
                 }
-            });
-        }
+                // 성공 시 실행취소 정보 저장(1단계만 지원)
+                lastDragUndo = {
+                    id: loc.id,
+                    from: { lon: original.lon, lat: original.lat },
+                    to: { lon: p.lng, lat: p.lat },
+                    used: false,
+                    at: Date.now()
+                };
+                await fetchLocations();
+                // 좌표 변경 시 매트릭스/경로 캐시가 무효화되므로 버튼 상태 재확인
+                checkMatrixFileExists();
+                checkRoutesFileExists();
+                // Depot 이동 시 안내 토스트
+                if (loc.id === 1) {
+                    showToast('Depot 이동 시 매트릭스/경로가 초기화됩니다');
+                }
+            } catch (e) {
+                console.error('좌표 업데이트 실패:', e);
+                alert('위치 업데이트 중 오류가 발생했습니다.');
+                // 실패 시 원래 좌표로 되돌림
+                marker.setLngLat([original.lon, original.lat]);
+            }
+        });
         
         markers.push(marker);
     });
+}
+
+// 간단한 토스트 표시
+function showToast(message, { timeout = 3000 } = {}) {
+    const container = document.getElementById('toast-container');
+    if (!container) return;
+    const el = document.createElement('div');
+    el.className = 'toast';
+    el.textContent = message;
+    container.appendChild(el);
+    setTimeout(() => {
+        try { el.remove(); } catch (_) {}
+    }, timeout);
 }
 
 function openPopup(data = {}) {
@@ -275,7 +422,7 @@ async function saveData() {
     }
 
     try {
-        const response = await fetch(url, {
+        const response = await withProjectId(url, {
             method: method,
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
@@ -284,7 +431,7 @@ async function saveData() {
         if (response.ok) {
             await fetchLocations();
             closePopup();
-            console.log('Data saved successfully');
+            // saved
         } else {
             const contentType = response.headers.get('content-type');
             let errorMessage;
@@ -306,7 +453,7 @@ async function saveData() {
 }
 
 function editLocation(id) {
-     fetch(`/api/locations`)
+     withProjectId(`/api/locations`)
         .then(response => response.json())
         .then(locations => {
             const location = locations.find(loc => loc.id === id);
@@ -326,7 +473,7 @@ function panToLocation(lon, lat) {
 async function deleteLocation(id) {
     if (confirm('Are you sure you want to delete this location?')) {
         try {
-            const response = await fetch(`/api/locations/${id}`, { method: 'DELETE' });
+            const response = await withProjectId(`/api/locations/${id}`, { method: 'DELETE' });
             if (!response.ok) {
                 throw new Error('Failed to delete location.');
             }
@@ -348,7 +495,7 @@ function uploadFile() {
     const formData = new FormData();
     formData.append('file', file);
 
-    fetch('/upload', {
+    withProjectId('/upload', {
         method: 'POST',
         body: formData
     })
@@ -364,7 +511,7 @@ function uploadFile() {
 
             // CSV 업로드 후 최신 데이터 반영 및 맵 자동 맞춤
             try {
-                const locationResponse = await fetch('/api/locations');
+                const locationResponse = await withProjectId('/api/locations');
                 if (!locationResponse.ok) throw new Error('Failed to reload locations');
                 const data = await locationResponse.json();
                 updateTable(data);
@@ -439,10 +586,10 @@ async function createMatrix() {
     const transportMode = document.querySelector('input[name="transportMode"]:checked').value;
     const metric = document.querySelector('input[name="metric"]:checked').value;
     
-    console.log('Creating matrix with:', { transportMode, metric });
+    // creating matrix
     
     try {
-        const response = await fetch('/api/create-matrix', {
+        const response = await withProjectId('/api/create-matrix', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ transportMode, metric })
@@ -472,7 +619,7 @@ async function createMatrix() {
 // Optimization functions
 async function checkMatrixFileExists() {
     try {
-        const response = await fetch('/api/check-matrix-file');
+    const response = await withProjectId('/api/check-matrix-file');
         const result = await response.json();
         
         const optimizationButton = document.getElementById('optimization-button');
@@ -486,7 +633,7 @@ async function checkMatrixFileExists() {
 
 async function checkRoutesFileExists() {
     try {
-        const response = await fetch('/api/check-routes');
+    const response = await withProjectId('/api/check-routes');
         const result = await response.json();
         
         const routeViewButton = document.getElementById('route-view-button');
@@ -507,17 +654,8 @@ async function checkRoutesFileExists() {
             routeRefreshButton.disabled = !hasRoutes;
         }
         
-        console.log('🔍 Route button status check:');
-        console.log('  - Has routes:', hasRoutes);
-        console.log('  - View button disabled:', routeViewButton.disabled);
-        console.log('  - Refresh button disabled:', routeRefreshButton ? routeRefreshButton.disabled : 'N/A (not loaded)');
-        console.log('  - API message:', result.message);
-        
-        if (hasRoutes) {
-            console.log('✅ Routes file found - Route buttons enabled');
-        } else {
-            console.log('❌ No routes file found:', result.message);
-        }
+        // 간단 로그
+        console.log('Route buttons:', { hasRoutes, viewDisabled: routeViewButton.disabled, refreshDisabled: routeRefreshButton ? routeRefreshButton.disabled : 'N/A' });
         
     } catch (error) {
         console.error('Error checking routes file:', error);
@@ -533,29 +671,66 @@ function openOptimizationPopup() {
     const popup = document.getElementById('optimization-popup');
     popup.classList.remove('popup-hidden');
     popup.style.display = 'flex';
-    
-    // 기본값 설정
+    // 기본값 설정 (클라이언트 기본)
     document.getElementById('vehicle-count').value = 1;
     document.getElementById('vehicle-capacity').value = 10;
     const tl = document.getElementById('time-limit-sec');
     if (tl) tl.value = 60;
-    
-    // 기본 선택값 설정 (총 거리 최소화)
+
     document.querySelector('input[name="primaryObjective"][value="distance"]').checked = true;
     document.querySelector('input[name="tiebreaker1"][value="none"]').checked = true;
     document.querySelector('input[name="tiebreaker2"][value="none"]').checked = true;
-    
-    // 체크박스 초기화
     document.querySelectorAll('input[name="additionalObjectives"]').forEach(cb => cb.checked = false);
-    
-    // 타이브레이커 기본값 설정 및 미리보기 업데이트
     updateTiebreakerDefaults();
-    
-    // 첫 번째 입력 필드에 포커스
-    setTimeout(() => {
-        document.getElementById('vehicle-count').focus();
-        document.getElementById('vehicle-count').select();
-    }, 100);
+
+    // 서버에 저장된 프로젝트별 설정이 있으면 불러와서 덮어쓰기
+    (async () => {
+        try {
+            const resp = await withProjectId('/api/optimize-settings');
+            if (!resp.ok) return; // 없거나 오류면 기본값 유지
+            const data = await resp.json();
+            if (!data.exists || !data.settings) return;
+            const s = data.settings;
+            // 안전하게 각 필드에 값 적용
+            if (s.vehicleCount) document.getElementById('vehicle-count').value = s.vehicleCount;
+            if (s.vehicleCapacity) document.getElementById('vehicle-capacity').value = s.vehicleCapacity;
+            if (s.timeLimitSec) document.getElementById('time-limit-sec').value = s.timeLimitSec;
+            if (s.routeMode) {
+                const el = document.querySelector(`input[name="routeMode"][value="${s.routeMode}"]`);
+                if (el) el.checked = true;
+            }
+            if (s.primaryObjective) {
+                const el = document.querySelector(`input[name="primaryObjective"][value="${s.primaryObjective}"]`);
+                if (el) el.checked = true;
+            }
+            if (s.tiebreaker1) {
+                const el = document.querySelector(`input[name="tiebreaker1"][value="${s.tiebreaker1}"]`);
+                if (el) el.checked = true;
+            }
+            if (s.tiebreaker2) {
+                const el = document.querySelector(`input[name="tiebreaker2"][value="${s.tiebreaker2}"]`);
+                if (el) el.checked = true;
+            }
+            // additionalObjectives는 배열
+            if (Array.isArray(s.additionalObjectives)) {
+                document.querySelectorAll('input[name="additionalObjectives"]').forEach(cb => cb.checked = false);
+                s.additionalObjectives.forEach(val => {
+                    const cb = document.querySelector(`input[name="additionalObjectives"][value="${val}"]`);
+                    if (cb) cb.checked = true;
+                });
+            }
+
+            // 업데이트 후 미리보기 갱신
+            updateTiebreakerDefaults();
+        } catch (e) {
+            console.warn('Failed to load saved optimization settings:', e);
+        } finally {
+            setTimeout(() => {
+                document.getElementById('vehicle-count').focus();
+                document.getElementById('vehicle-count').select();
+            }, 100);
+        }
+    })();
 }
 
 function closeOptimizationPopup() {
@@ -590,18 +765,39 @@ async function runOptimization() {
     const additionalObjectives = Array.from(document.querySelectorAll('input[name="additionalObjectives"]:checked')).map(cb => cb.value);
     
     // Close optimization parameter popup and show loading popup with exact timer
+    // 먼저 사용자 설정을 프로젝트에 저장
+    try {
+        const settingsPayload = {
+            vehicleCount: vehicleCount,
+            vehicleCapacity: vehicleCapacity,
+            timeLimitSec: timeLimitSec,
+            primaryObjective: primaryObjective,
+            tiebreaker1: tiebreaker1,
+            tiebreaker2: tiebreaker2,
+            additionalObjectives: additionalObjectives,
+            routeMode: (document.querySelector('input[name="routeMode"]:checked') || {}).value || 'FREE_START_DEPOT_END'
+        };
+        // 비동기 저장(응답 실패여도 최적화는 이어감)
+        (async () => {
+            try {
+                await withProjectId('/api/optimize-settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(settingsPayload)
+                });
+            } catch (e) {
+                console.warn('Failed to save optimization settings:', e);
+            }
+        })();
+
+    } catch (e) {
+        console.warn('Could not persist optimization settings:', e);
+    }
+
     closeOptimizationPopup();
     showLoadingPopup(timeLimitSec);
     
-    console.log('Running optimization with:', { 
-        vehicleCount, 
-        vehicleCapacity, 
-        timeLimitSec,
-        primaryObjective, 
-        tiebreaker1, 
-        tiebreaker2, 
-        additionalObjectives 
-    });
+    // run optimization
     
     try {
         // Start with data validation message
@@ -615,7 +811,7 @@ async function runOptimization() {
     // Route mode from radio selection
     const routeMode = (document.querySelector('input[name="routeMode"]:checked') || {}).value || 'FREE_START_DEPOT_END';
 
-        const response = await fetch('/api/optimize', {
+        const response = await withProjectId('/api/optimize', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ 
@@ -923,25 +1119,42 @@ function updateOptimizationWarnings(primary, additional) {
     }
 }
 
-// 페이지 로드 시 미리보기 업데이트
-document.addEventListener('DOMContentLoaded', () => {
-    // 기존 코드...
-    
-    // 라디오 버튼과 체크박스 변경 시 미리보기 업데이트
-    setTimeout(() => {
-        if (document.querySelector('input[name="primaryObjective"]')) {
-            updateOptimizationPreview();
-            
-            // 이벤트 리스너 등록
-            document.querySelectorAll('input[name="primaryObjective"], input[name="tiebreaker1"], input[name="tiebreaker2"], input[name="additionalObjectives"]').forEach(input => {
-                input.addEventListener('change', updateOptimizationPreview);
-            });
-        }
-    }, 100);
-});
+// 미리보기 업데이트 리스너는 최초 DOMContentLoaded에서 등록됨
 
 function setupKeyboardEvents() {
     document.addEventListener('keydown', (e) => {
+        // Ctrl+Z: 마지막 드래그 실행취소(1회)
+        if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) {
+            // 로딩/팝업 상태와 상관없이, 단 일반 입력 중에는 방해하지 않도록 텍스트 입력 포커스 시에는 무시
+            const tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : '';
+            const type = (e.target && e.target.type) ? String(e.target.type).toLowerCase() : '';
+            const isTyping = tag === 'input' && (type === 'text' || type === 'number' || type === 'search');
+            if (!isTyping && lastDragUndo && !lastDragUndo.used) {
+                e.preventDefault();
+                const { id, from } = lastDragUndo;
+                (async () => {
+                    try {
+                        const resp = await withProjectId(`/api/locations/${id}`, {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ lon: from.lon, lat: from.lat })
+                        });
+                        if (!resp.ok) {
+                            const err = await resp.json().catch(() => ({}));
+                            throw new Error(err.error || '실행취소 실패');
+                        }
+                        lastDragUndo.used = true; // 1회만 허용
+                        await fetchLocations();
+                        // 지도 부드럽게 해당 위치로 이동(선택사항)
+                        panToLocation(from.lon, from.lat);
+                    } catch (err) {
+                        console.error('Undo failed:', err);
+                        alert('실행취소 중 오류가 발생했습니다.');
+                    }
+                })();
+                return; // 다른 키 처리와 충돌 방지
+            }
+        }
         // 현재 열려있는 팝업 확인
         const popup = document.getElementById('popup');
         const matrixPopup = document.getElementById('matrix-popup');
@@ -1079,7 +1292,7 @@ function openRouteSettingsPopup() {
             try {
                 // UI: 로딩 표시
                 showRouteLoading(true);
-                const resp = await fetch('/generate-routes-from-csv', {
+                const resp = await withProjectId('/generate-routes-from-csv', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -1193,11 +1406,11 @@ function initializeRouteMap() {
         
         // 전역 변수에도 할당
         window.routeMap = routeMap;
-        console.log('🗺️ 지도 객체를 전역 변수에 할당:', window.routeMap);
+    console.log('Route map ready');
         
-        // 지도 로드 완료 후 추가 초기화
+    // 로드 완료 후 콜백
         routeMap.on('load', () => {
-            console.log('Route map initialized successfully');
+            console.log('Route map initialized');
             // 여기에 나중에 경로 데이터 로드 로직 추가
         });
         
@@ -1243,10 +1456,10 @@ async function loadAndDisplayRoutes() {
         // 로딩 표시
         showRouteLoading(true);
         
-        console.log('📍 경로 데이터 로딩 중...');
+    console.log('Loading routes...');
         
         // 스마트 경로 로딩 API 호출
-        const response = await fetch('/get-routes', {
+        const response = await withProjectId('/get-routes', {
             method: 'GET'
         });
         
@@ -1263,13 +1476,10 @@ async function loadAndDisplayRoutes() {
         
         // 캐시 여부에 따른 로그 출력 및 상태 표시
         if (routeData.from_cache) {
-            console.log('✅ 캐시된 경로 로드 완료:', routeData);
-            console.log('📅 생성 시간:', routeData.generated_at);
-            
             const generatedTime = new Date(routeData.generated_at).toLocaleString('ko-KR');
-            console.log(`💾 캐시된 데이터 (${generatedTime})`);
+            console.log(`Loaded cached routes (${generatedTime})`);
         } else {
-            console.log('✅ 새로운 경로 생성 완료:', routeData);
+            console.log('Generated new routes');
         }
         
         // 지도에 경로 표시
@@ -1288,78 +1498,27 @@ async function loadAndDisplayRoutes() {
     }
 }
 
-// 강제로 새로운 경로 생성 (Refresh Routes용)
-async function refreshAndDisplayRoutes() {
-    if (!routeMap) {
-        console.error('Route map not initialized');
-        return;
-    }
-    
-    try {
-        // 로딩 표시
-        showRouteLoading(true);
-        
-        console.log('� T-map API로 새로운 경로 생성 중...');
-        
-        // 강제 경로 재생성 API 호출
-        const response = await fetch('/generate-routes-from-csv', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            }
-        });
-        
-        if (!response.ok) {
-            const errorData = await response.json();
-            throw new Error(errorData.error || '경로 생성에 실패했습니다.');
-        }
-        
-        const routeData = await response.json();
-        
-        if (!routeData.success) {
-            throw new Error('경로 생성에 실패했습니다.');
-        }
-        
-        console.log('✅ 새로운 경로 생성 완료:', routeData);
-        
-        // 지도에 경로 표시
-        displayTmapRoutes(routeData.vehicle_routes);
-        
-        // 통계 정보 업데이트
-        if (typeof updateRouteStatistics === 'function') {
-            updateRouteStatistics(routeData.statistics);
-        }
-        
-    } catch (error) {
-        console.error('❌ 경로 생성 실패:', error);
-        showRouteError(error.message);
-    } finally {
-        showRouteLoading(false);
-    }
-}
+// (미사용) 강제 경로 생성 함수는 제거되었습니다. 필요 시 refreshRoutes -> 설정 팝업에서 생성하도록 통합 사용
 
 // T-map 경로들을 지도에 표시
 function displayTmapRoutes(vehicleRoutes) {
     if (!routeMap || !vehicleRoutes) return;
 
-    // 먼저 가능한 한 통합 클리너 사용(레이어/소스/마커 모두 정리)
+    // 통합 클리너가 있으면 사용
     if (typeof window.clearAllRouteLayers === 'function') {
         window.clearAllRouteLayers(routeMap);
     } else {
         clearRouteMapLayers();
     }
 
-    // 통합 경로 표출/관리 함수에 위임하여
-    // 1) 라인 레이어와 2) 마커를 차량별로 함께 등록/추적하게 함
+    // 통합 렌더러로 위임
     if (typeof window.displayAndManageRoutes === 'function') {
         // DOM 렌더 안정화를 위해 약간 지연 후 실행
         setTimeout(() => {
             window.displayAndManageRoutes(vehicleRoutes, routeMap);
-            console.log(`✅ ${Object.keys(vehicleRoutes).length}개 차량 경로 표시 완료 (통합 함수 사용)`);
         }, 50);
     } else {
-        console.error('❌ displayAndManageRoutes 함수를 찾을 수 없습니다!');
-        // 폴백: 최소한 기존 레이어만 정리
+    console.error('displayAndManageRoutes not found');
         clearRouteMapLayers();
     }
 }
@@ -1492,19 +1651,13 @@ function showRouteError(message) {
 
 // 경로 상태 업데이트
 // 페이지 로드 시 경로 상태 확인
-document.addEventListener('DOMContentLoaded', function() {
-    console.log('🎯 Second DOMContentLoaded event - Checking route status and buttons');
-    checkRouteStatus();
-    
-    // 페이지 로드 시 버튼 상태도 함께 확인
-    checkRoutesFileExists();
-});
+// 초기 로드시 라우트 캐시 상태 확인은 최초 DOMContentLoaded에서 함께 수행됨
 
 // 경로 캐시 상태 확인
 async function checkRouteStatus() {
     try {
         console.log('🔍 Checking route cache status...');
-        const response = await fetch('/check-route-cache');
+    const response = await withProjectId('/check-route-cache');
         if (response.ok) {
             const data = await response.json();
             console.log('Cache status response:', data);

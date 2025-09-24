@@ -100,7 +100,8 @@ def validate_matrix_for_ortools(matrix, matrix_name="matrix"):
                 print(f"Warning: {matrix_name}[{i}][{j}] has invalid value: {val}")
                 return False
     
-    print(f"✓ {matrix_name} validation passed")
+    # Use ASCII-friendly output to avoid console encoding issues (e.g., CP949)
+    print(f"[OK] {matrix_name} validation passed")
     return True
 
 def load_distance_matrix_from_csv(csv_path):
@@ -318,7 +319,7 @@ def diagnose_optimization_failure(locations, cost_matrix, vehicle_capacity, num_
     
     return {
         "type": "unknown",
-        "message": f"최적화 실패: 해결책을 찾을 수 없습니다.\n제안사항:\n" + "\n".join([f"• {s}" for s in suggestions])
+        "message": f"최적화 실패: 해결책을 찾을 수 없습니다.\n제안사항:\n" + "\n".join([f"- {s}" for s in suggestions])
     }
 
 
@@ -375,20 +376,23 @@ def extract_solution_data(data, manager, routing, solution):
             return False
         return fake_end_offset <= node_idx < fake_end_offset + num_fake_ends
     
-    # Load matrices for calculating both distance and time
-    try:
-        matrices_result = load_matrices_from_files()
-        if not matrices_result["success"]:
-            print("Warning: Could not load matrices for detailed calculation")
-            distance_matrix = data["cost_matrix"]  # Fallback to primary matrix
-            time_matrix = data["cost_matrix"]
-        else:
-            distance_matrix = matrices_result["distance_matrix"]
-            time_matrix = matrices_result["time_matrix"]
-    except Exception as e:
-        print(f"Warning: Error loading matrices: {e}")
-        distance_matrix = data["cost_matrix"]
-        time_matrix = data["cost_matrix"]
+    # Prefer matrices attached to data (populated by solve_vrp) to avoid re-loading files
+    distance_matrix = data.get("_distance_matrix_for_output")
+    time_matrix = data.get("_time_matrix_for_output")
+    if distance_matrix is None or time_matrix is None:
+        try:
+            matrices_result = load_matrices_from_files()
+            if matrices_result.get("success"):
+                distance_matrix = matrices_result.get("distance_matrix") or distance_matrix or data["cost_matrix"]
+                time_matrix = matrices_result.get("time_matrix") or time_matrix or data["cost_matrix"]
+            else:
+                print("Warning: Could not load matrices for detailed calculation")
+                distance_matrix = distance_matrix or data["cost_matrix"]
+                time_matrix = time_matrix or data["cost_matrix"]
+        except Exception as e:
+            print(f"Warning: Error loading matrices: {e}")
+            distance_matrix = distance_matrix or data["cost_matrix"]
+            time_matrix = time_matrix or data["cost_matrix"]
     
     for vehicle_id in range(data["num_vehicles"]):
         index = routing.Start(vehicle_id)
@@ -907,14 +911,14 @@ def solve_vrp(locations_csv_path=None, time_matrix_path=None, distance_matrix_pa
     validation = validate_vrp_data(all_locations, primary_matrix, vehicle_capacity, num_vehicles)
     
     if not validation["valid"]:
-        error_msg = "최적화를 수행할 수 없습니다:\n" + "\n".join([f"• {error}" for error in validation["errors"]])
+        error_msg = "최적화를 수행할 수 없습니다:\n" + "\n".join([f"- {error}" for error in validation["errors"]])
         return {"success": False, "error": error_msg, "validation_errors": validation["errors"]}
     
     # Log warnings if any
     if validation["warnings"]:
         print("경고사항:")
         for warning in validation["warnings"]:
-            print(f"• {warning}")
+            print(f"- {warning}")
     
     print(f"최적화 목적: {matrix_name} 기준 ({matrix_unit})")
     
@@ -974,6 +978,12 @@ def solve_vrp(locations_csv_path=None, time_matrix_path=None, distance_matrix_pa
     # Return solution data
     if solution:
         try:
+            # Attach the original loaded matrices so extract_solution_data can use them
+            try:
+                data["_distance_matrix_for_output"] = distance_matrix
+                data["_time_matrix_for_output"] = time_matrix
+            except Exception:
+                pass
             return extract_solution_data(data, manager, routing, solution)
         except Exception as e:
             return {"success": False, "error": f"결과 추출 중 오류: {str(e)}"}
