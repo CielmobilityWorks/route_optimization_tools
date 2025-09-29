@@ -355,12 +355,15 @@
         <div class="route-modal-header">
             <h3>Route Visualization</h3>
             <div class="route-modal-controls">
-                <button id="route-refresh-button" onclick="refreshRoutes()" title="T-map API로 새로운 경로 생성">
+                <button id="route-refresh-button" class="route-action-btn" onclick="refreshRoutes()" title="T-map API로 새로운 경로 생성">
                     Refresh Routes
                 </button>
-                <button id="route-full-view-button" onclick="openFullRouteVisualization()" title="전체 화면으로 경로 보기">
+                <button id="route-full-view-button" class="route-action-btn" onclick="openFullRouteVisualization()" title="전체 화면으로 경로 보기">
                     Full View
                 </button>
+                    <button id="route-view-report-button" class="route-action-btn" onclick="openRouteReport()" title="View Route Report">
+                        View Report
+                    </button>
                 <button class="route-modal-close" onclick="closeRouteViewModal()">&times;</button>
             </div>
         </div>

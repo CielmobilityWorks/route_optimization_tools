@@ -7,6 +7,7 @@ import json
 import secrets
 import string
 from utils.tmap_utils import create_matrix_from_locations
+from utils.report_generator import generate_standalone_route_html
 from dotenv import load_dotenv
 from urllib.parse import urlencode, urlparse, parse_qs
 
@@ -900,19 +901,60 @@ def generate_route_html():
             routes_df = pd.read_csv(project_path('optimization_routes.csv', pid), encoding='utf-8-sig')
             route_data = convert_routes_df_to_visualization_data(routes_df, pid)
         
-        # 독립적인 HTML 생성 (외부 의존성 없이)
+        # Per-project report path
+        report_filename = 'route_report.html'
+        report_path = project_path(report_filename, pid)
+
+        # If report exists, serve it directly from project folder
+        if os.path.exists(report_path):
+            proj_dir = os.path.dirname(report_path)
+            return send_from_directory(proj_dir, report_filename, mimetype='text/html')
+
+        # Generate standalone HTML and save it into project folder
         html_content = generate_standalone_route_html(route_data)
+        try:
+            with open(report_path, 'w', encoding='utf-8') as f:
+                f.write(html_content)
+        except Exception as e:
+            print(f"Failed to write report for project {pid}: {e}")
+
+        proj_dir = os.path.dirname(report_path)
+        return send_from_directory(proj_dir, report_filename, mimetype='text/html')
         
-        # 메모리에서 HTML 파일 생성
-        html_buffer = io.StringIO(html_content)
-        html_bytes = io.BytesIO(html_content.encode('utf-8'))
-        
-        response = make_response(html_bytes.getvalue())
-        response.headers['Content-Type'] = 'text/html; charset=utf-8'
-        response.headers['Content-Disposition'] = f'attachment; filename=route_visualization_{datetime.now().strftime("%Y%m%d_%H%M%S")}.html'
-        
-        return response
-        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/generate-route-table-report', methods=['POST'])
+def generate_route_table_report():
+    """Generate the table-based route report (reads generated_routes.json per project) and return HTML."""
+    try:
+        pid = get_project_id()
+        report_filename = 'route_table_report.html'
+        report_path = project_path(report_filename, pid)
+
+        # If a per-project report already exists, serve it directly (reuse)
+        if os.path.exists(report_path):
+            proj_dir = os.path.dirname(report_path)
+            return send_from_directory(proj_dir, report_filename, mimetype='text/html')
+
+        # Otherwise generate and save it
+        try:
+            from utils.report_generator import generate_route_table_report_html
+            report_html = generate_route_table_report_html(project_id=pid)
+        except Exception as e:
+            print(f"Failed to generate table report for project {pid}: {e}")
+            return jsonify({'error': str(e)}), 500
+
+        try:
+            with open(report_path, 'w', encoding='utf-8') as f:
+                f.write(report_html)
+        except Exception as e:
+            print(f"Warning: could not write report file {report_path}: {e}")
+
+        proj_dir = os.path.dirname(report_path)
+        return send_from_directory(proj_dir, report_filename, mimetype='text/html')
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -978,199 +1020,7 @@ def convert_routes_df_to_visualization_data(routes_df, pid: str | None = None):
     
     return route_data
 
-def generate_standalone_route_html(route_data):
-    """외부 의존성 없이 독립적으로 실행 가능한 HTML 생성"""
-    
-    # Mapbox access token (실제 환경에서는 환경변수나 설정 파일에서 가져와야 함)
-    mapbox_token = "pk.eyJ1IjoieW91ci11c2VybmFtZSIsImEiOiJjbHh4eHh4eHgweHh4eHhxcXFxcXFxcXEifQ.xxxxxxxxxxxxxxxxxxxxxx"
-    
-    routes_json = str(route_data['routes']).replace("'", '"') if route_data['routes'] else '[]'
-    
-    html_content = f"""<!DOCTYPE html>
-<html lang="ko">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Route Visualization Results - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</title>
-    
-    <script src='https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.js'></script>
-    <link href='https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css' rel='stylesheet' />
-    
-    <style>
-        body {{
-            margin: 0;
-            padding: 20px;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background-color: #f5f5f5;
-        }}
-        .header {{
-            text-align: center;
-            margin-bottom: 20px;
-            background: white;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }}
-        .header h1 {{
-            margin: 0 0 10px 0;
-            color: #333;
-            font-size: 24px;
-        }}
-        .controls {{
-            display: flex;
-            justify-content: center;
-            gap: 10px;
-            margin-bottom: 20px;
-        }}
-        .btn {{
-            padding: 8px 16px;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 14px;
-        }}
-        .btn-primary {{
-            background-color: #007bff;
-            color: white;
-        }}
-        .map-container {{
-            width: 100%;
-            height: 600px;
-            border-radius: 8px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-            overflow: hidden;
-        }}
-        .route-info {{
-            background: white;
-            margin-top: 20px;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }}
-        .route-stats {{
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 15px;
-        }}
-        .stat-item {{
-            padding: 10px;
-            background: #f8f9fa;
-            border-radius: 4px;
-            text-align: center;
-        }}
-        .stat-label {{
-            font-size: 12px;
-            color: #666;
-            text-transform: uppercase;
-        }}
-        .stat-value {{
-            font-size: 18px;
-            font-weight: bold;
-            color: #333;
-            margin-top: 5px;
-        }}
-        @media print {{
-            .controls {{ display: none; }}
-            .map-container {{ height: 400px; break-inside: avoid; }}
-        }}
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1>Route Visualization Results</h1>
-        <div class="subtitle">Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>
-    </div>
-    
-    <div class="controls">
-        <button class="btn btn-primary" onclick="window.print()">Print / Save as PDF</button>
-    </div>
-    
-    <div class="map-container">
-        <div id="route-map" style="width: 100%; height: 100%;"></div>
-    </div>
-    
-    <div class="route-info">
-        <h3>Route Statistics</h3>
-        <div class="route-stats">
-            <div class="stat-item">
-                <div class="stat-label">Total Distance</div>
-                <div class="stat-value">{route_data.get('total_distance', 'N/A')}</div>
-            </div>
-            <div class="stat-item">
-                <div class="stat-label">Total Duration</div>
-                <div class="stat-value">{route_data.get('total_duration', 'N/A')}</div>
-            </div>
-            <div class="stat-item">
-                <div class="stat-label">Number of Routes</div>
-                <div class="stat-value">{route_data.get('route_count', 'N/A')}</div>
-            </div>
-            <div class="stat-item">
-                <div class="stat-label">Optimization Score</div>
-                <div class="stat-value">{route_data.get('optimization_score', 'N/A')}</div>
-            </div>
-        </div>
-    </div>
-    
-    <script>
-        mapboxgl.accessToken = '{mapbox_token}';
-        
-        let routeMap = null;
-        const routeData = {routes_json};
-        
-        document.addEventListener('DOMContentLoaded', function() {{
-            initializeMap();
-        }});
-        
-        function initializeMap() {{
-            routeMap = new mapboxgl.Map({{
-                container: 'route-map',
-                style: 'mapbox://styles/mapbox/light-v11',
-                center: [126.9779, 37.5547],
-                zoom: 11
-            }});
-            
-            routeMap.on('load', function() {{
-                routeMap.addControl(new mapboxgl.NavigationControl());
-                if (routeData && routeData.length > 0) {{
-                    displayRoutes(routeData);
-                }}
-            }});
-        }}
-        
-        function displayRoutes(routes) {{
-            const colors = (window && window.ROUTE_COLORS) ? window.ROUTE_COLORS : ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7'];
-            const bounds = new mapboxgl.LngLatBounds();
-            
-            routes.forEach((route, index) => {{
-                const color = colors[index % colors.length];
-                
-                if (route.stops && route.stops.length > 0) {{
-                    route.stops.forEach((stop, stopIndex) => {{
-                        bounds.extend([stop.longitude, stop.latitude]);
-                        
-                        new mapboxgl.Marker({{ color: color, scale: 0.8 }})
-                        .setLngLat([stop.longitude, stop.latitude])
-                        .setPopup(new mapboxgl.Popup().setHTML(`
-                            <div>
-                                <strong>Route ${{route.vehicle_id}} - Stop ${{stopIndex + 1}}</strong><br>
-                                ${{stop.name}}<br>
-                                <small>${{stop.latitude.toFixed(6)}}, ${{stop.longitude.toFixed(6)}}</small>
-                            </div>
-                        `))
-                        .addTo(routeMap);
-                    }});
-                }}
-            }});
-            
-            if (!bounds.isEmpty()) {{
-                routeMap.fitBounds(bounds, {{ padding: 50, maxZoom: 15 }});
-            }}
-        }}
-    </script>
-</body>
-</html>"""
-    
-    return html_content
+
 
 @app.route('/get-routes', methods=['GET'])
 def get_routes():
@@ -1551,15 +1401,64 @@ def generate_routes_from_csv_internal(options: dict | None = None):
                 print(f"  도착지: {end_point['name']}")
                 print(f"  경유지: {len(via_points)}개")
                 
-                route_result = tmap_router.get_route(
-                    start_point,
-                    end_point,
-                    via_points,
-                    searchOption=opt_search,
-                    start_time=opt_start,
-                    carType=opt_car,
-                    viaTime=opt_via
-                )
+                # If there are intermediate via points, call T-map sequential route API.
+                # If there are no via points (direct from start -> end), some T-map
+                # endpoints can fail or return no geometry. In that case we create a
+                # simple fallback single-leg route (LineString between start and end)
+                # and estimate distance/time so the vehicle still has a usable result.
+                if via_points:
+                    route_result = tmap_router.get_route(
+                        start_point,
+                        end_point,
+                        via_points,
+                        searchOption=opt_search,
+                        start_time=opt_start,
+                        carType=opt_car,
+                        viaTime=opt_via
+                    )
+                else:
+                    # Try OSRM for single-leg routing first (road network based).
+                    try:
+                        route_result = tmap_router.get_route_single(start_point, end_point)
+                    except Exception as e_single:
+                        print(f"  ⚠️ T-map 단일 경로 API 실패, 하버사인 폴백 사용: {e_single}")
+                        # Haversine fallback
+                        try:
+                            sx, sy = float(start_point['x']), float(start_point['y'])
+                            ex, ey = float(end_point['x']), float(end_point['y'])
+                        except Exception:
+                            raise ValueError(f"Invalid coordinate data for vehicle {vehicle_id}")
+
+                        from math import radians, sin, cos, atan2, sqrt
+
+                        def haversine_meters(lon1, lat1, lon2, lat2):
+                            R = 6371000.0
+                            dlat = radians(lat2 - lat1)
+                            dlon = radians(lon2 - lon1)
+                            a = sin(dlat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon/2)**2
+                            c = 2 * atan2(sqrt(a), sqrt(1-a))
+                            return R * c
+
+                        dist_m = haversine_meters(sx, sy, ex, ey)
+                        avg_speed_kmh = 40.0
+                        time_s = (dist_m / 1000.0) / avg_speed_kmh * 3600.0 if dist_m > 0 else 0
+
+                        route_result = {
+                            'features': [
+                                {
+                                    'type': 'Feature',
+                                    'geometry': {
+                                        'type': 'LineString',
+                                        'coordinates': [[sx, sy], [ex, ey]]
+                                    },
+                                    'properties': {}
+                                }
+                            ],
+                            'properties': {
+                                'totalDistance': dist_m,
+                                'totalTime': time_s
+                            }
+                        }
                 
                 # 경로 데이터 처리
                 if 'features' in route_result and route_result['features']:
@@ -1660,6 +1559,22 @@ def generate_routes_from_csv_internal(options: dict | None = None):
                 json.dump(metadata, f, ensure_ascii=False, indent=2)
                 
             print(f"💾 경로 데이터 저장 완료: {project_path('generated_routes.json', pid)}")
+            # If a per-project HTML report exists, remove it so next View Report regenerates it
+            try:
+                report_file = project_path('route_report.html', pid)
+                if os.path.exists(report_file):
+                    os.remove(report_file)
+                    print(f"🗑️ Removed stale report for project {pid}: {report_file}")
+                # also remove table report so it will be regenerated on next View Report
+                try:
+                    table_report = project_path('route_table_report.html', pid)
+                    if os.path.exists(table_report):
+                        os.remove(table_report)
+                        print(f"🗑️ Removed stale table report for project {pid}: {table_report}")
+                except Exception as rm_table_err:
+                    print(f"⚠️ Failed to remove stale table report for project {pid}: {rm_table_err}")
+            except Exception as rm_err:
+                print(f"⚠️ Failed to remove stale report for project {pid}: {rm_err}")
             
         except Exception as save_error:
             print(f"⚠️ 경로 데이터 저장 실패: {save_error}")

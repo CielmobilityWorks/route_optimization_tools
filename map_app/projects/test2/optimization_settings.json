@@ -1,6 +1,6 @@
 {
-  "vehicleCount": 4,
-  "vehicleCapacity": 15,
+  "vehicleCount": 2,
+  "vehicleCapacity": 40,
   "timeLimitSec": 60,
   "primaryObjective": "time",
   "tiebreaker1": "makespan",

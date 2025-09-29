@@ -1366,6 +1366,33 @@ function closeRouteSettingsPopup() {
     popup.style.display = 'none';
 }
 
+// Generate route report HTML on server and open in new tab
+async function openRouteReport() {
+    const btn = document.getElementById('route-view-report-button');
+    if (btn) btn.disabled = true;
+    showRouteLoading(true);
+    try {
+    const resp = await withProjectId('/generate-route-table-report', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            throw new Error(err.error || 'Failed to generate report');
+        }
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+    // open in a popup window (width/height) so it behaves like Full View
+    // note: some browsers may block popups; in that case it will open a new tab
+    window.open(url, '_blank', 'width=1200,height=800');
+        // revoke after delay to allow download/view
+        setTimeout(() => URL.revokeObjectURL(url), 60 * 1000);
+    } catch (e) {
+        console.error('Report generation failed:', e);
+        alert(e.message || 'Failed to generate report');
+    } finally {
+        if (btn) btn.disabled = false;
+        showRouteLoading(false);
+    }
+}
+
 // YYYYMMDDHHMM 포맷 현재시간
 function getCurrentDateTimeForDatetimeLocal() {
     const d = new Date();

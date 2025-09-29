@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Route Table Report</title>
+<style>
+body{font-family:Segoe UI,Helvetica,Arial;margin:12px;color:#222;font-size:13px}
+h1{font-size:18px;margin-bottom:6px}
+.report-container{display:flex;flex-direction:column;align-items:flex-start}
+.report-box{width:800px;background:#fff;padding:12px;border-radius:6px;box-shadow:0 1px 3px rgba(0,0,0,0.08);margin-bottom:14px}
+table{width:100%;border-collapse:collapse;margin-top:8px}
+th,td{border:1px solid #e6e6e6;padding:6px 8px;font-size:12px}
+th{background:#f7fafc;font-weight:600}
+small.meta{color:#666;font-size:11px}
+.vehicle-header{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:4px;color:#fff;font-weight:700}
+.vehicle-color-pill{width:12px;height:12px;border-radius:3px;display:inline-block;margin-right:8px}
+.summary{margin-top:8px;color:#444;font-size:12px}
+.toggle-btn{margin-left:auto;background:rgba(255,255,255,0.12);border:0;color:#fff;padding:4px 8px;border-radius:4px;cursor:pointer;font-weight:700}
+.vehicle-body{margin-top:8px;overflow:hidden;max-height:2000px;transition:max-height 260ms ease;padding-top:6px}
+.vehicle-body.collapsed{max-height:0;padding-top:0}
+th.num, td.num{text-align:right}
+.global-summary-grid{width:800px;display:flex;gap:10px;margin:10px 0;padding:0}
+.summary-card{flex:1;background:#fff;padding:12px;border-radius:8px;box-shadow:0 2px 6px rgba(0,0,0,0.06);text-align:center;color:#222}
+.summary-card .label{font-size:12px;color:#666;margin-bottom:8px}
+.summary-card .value{font-size:18px;font-weight:800;color:#222}
+</style>
+<script>function toggleVehicleBody(id){var el=document.getElementById(id);var btn=document.getElementById(id+"-btn");if(!el) return; if(el.classList.contains("collapsed")){el.classList.remove("collapsed"); if(btn) btn.textContent="▼";} else {el.classList.add("collapsed"); if(btn) btn.textContent="▲";}} </script>
+</head><body>
+<h1>Route Table Report</h1>
+<div style="margin:8px 0 12px 0;">
+<button id="download-report-btn" style="padding:6px 10px;border-radius:4px;border:1px solid #ddd;background:#f5f5f5;cursor:pointer">Download HTML</button>
+</div>
+<script>
+function downloadReport(){
+  try{
+    var filename="route_table_report.html";
+    var html=document.documentElement.outerHTML;
+    var blob=new Blob([html],{type:"text/html;charset=utf-8"});
+    var url=URL.createObjectURL(blob);
+    var a=document.createElement("a");
+    a.href=url; a.download=filename; document.body.appendChild(a); a.click();
+    setTimeout(function(){ document.body.removeChild(a); URL.revokeObjectURL(url); }, 1000);
+  } catch(e) { console.error(e); alert("Download failed: "+(e && e.message ? e.message : e)); }
+}
+document.addEventListener("DOMContentLoaded", function(){
+  var btn=document.getElementById("download-report-btn"); if(btn) btn.addEventListener("click", downloadReport);
+});
+</script>
+<div class="meta"><small class="meta">Generated: 2025-09-29 11:29:45</small></div>
+<div class="global-summary-grid">
+<div class="summary-card"><div class="label">Total Demand(EA)</div><div class="value">2</div></div>
+<div class="summary-card"><div class="label">Total Distance(km)</div><div class="value">2.70</div></div>
+<div class="summary-card"><div class="label">Total Time</div><div class="value">00시간 18분</div></div>
+<div class="summary-card"><div class="label">Total Demand(EA)</div><div class="value">0</div></div>
+</div>
+<div class="chart-box report-box" style="padding:10px;display:flex;gap:10px;">
+<div style="flex:1;padding:6px;box-sizing:border-box;"><canvas id="distanceChart" style="width:100%;height:260px"></canvas></div>
+<div style="flex:1;padding:6px;box-sizing:border-box;"><canvas id="timeChart" style="width:100%;height:260px"></canvas></div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.3.0/dist/chart.umd.min.js"></script>
+<script>
+const _chartLabels = ["V1", "V2"];
+const _chartData = [1.5, 1.2];
+const _chartTimeData = [10.0, 8.33];
+document.addEventListener("DOMContentLoaded", function(){
+  try{
+    const ctxDist = document.getElementById("distanceChart").getContext("2d");
+    const ctxTime = document.getElementById("timeChart").getContext("2d");
+    // small plugin to draw value labels above each bar and draw avg at right edge; computes avg per-chart
+    const dataLabelPlugin = {
+      id: "dataLabelPlugin",
+      afterDatasetDraw(chart, args, options) {
+        const ctx = chart.ctx;
+        // draw value labels above each bar
+        chart.data.datasets.forEach((dataset, i) => {
+          const meta = chart.getDatasetMeta(i);
+          if (!meta || meta.type !== "bar") return;
+          meta.data.forEach((bar, idx) => {
+            const val = dataset.data[idx];
+            if (val === null || val === undefined) return;
+            ctx.save();
+            ctx.fillStyle = "#111";
+            ctx.font = "12px Arial";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "bottom";
+            ctx.fillText(String(val), bar.x, bar.y - 6);
+            ctx.restore();
+          });
+        });
+        // draw average value at right edge in red (compute per-chart)
+        try {
+          const ds = chart.data && chart.data.datasets && chart.data.datasets[0] ? chart.data.datasets[0].data : null;
+          const avgVal = ds && ds.length ? (ds.reduce((a,b)=>a+(b||0),0)/ds.length) : null;
+          const avgDisplay = (avgVal !== null) ? (Math.round(avgVal * 100) / 100).toFixed(2) : null;
+          if (avgDisplay !== null) {
+            const area = chart.chartArea;
+            const x = area.right - 6;
+            const y = area.top + 12;
+            ctx.save();
+            ctx.fillStyle = "#c00";
+            ctx.font = "12px Arial";
+            ctx.textAlign = "right";
+            ctx.textBaseline = "top";
+            ctx.fillText('Avr: ' + avgDisplay, x, y);
+            ctx.restore();
+          }
+        } catch(e) { /* ignore drawing average failures */ }
+      }
+    };
+    Chart.register(dataLabelPlugin);
+    const distChart = new Chart(ctxDist, {
+      type: "bar",
+      data: { labels: _chartLabels, datasets: [ { label: "Distance (km)", data: _chartData, backgroundColor: "rgba(54,162,235,0.8)", borderColor: "rgba(54,162,235,1)", borderWidth: 1 }, { type: "line", label: "Average", data: Array(_chartData.length).fill(_chartData.length?(_chartData.reduce((a,b)=>a+b,0)/_chartData.length):0), borderColor: "rgba(255,99,132,0.9)", borderWidth: 1, pointRadius: 0, borderDash: [6,4], order: 0 } ] },
+      options: { responsive:true, maintainAspectRatio:false, plugins:{ title:{ display:true, text:"Distance", align:"start", font:{ size:14 } }, legend:{ display:false } }, scales:{ x:{ grid:{ display:false, drawBorder:false } }, y:{ beginAtZero:true, grid:{ display:false, drawBorder:false }, ticks:{ display:false } } } }
+    );
+    const timeChart = new Chart(ctxTime, {
+      type: "bar",
+      data: { labels: _chartLabels, datasets: [ { label: "Time (min)", data: _chartTimeData, backgroundColor: "rgba(75,192,192,0.8)", borderColor: "rgba(75,192,192,1)", borderWidth: 1 }, { type: "line", label: "Average", data: Array(_chartTimeData.length).fill(_chartTimeData.length?(_chartTimeData.reduce((a,b)=>a+b,0)/_chartTimeData.length):0), borderColor: "rgba(255,159,64,0.9)", borderWidth: 1, pointRadius: 0, borderDash: [6,4], order: 0 } ] },
+      options: { responsive:true, maintainAspectRatio:false, plugins:{ title:{ display:true, text:"Time (min)", align:"start", font:{ size:14 } }, legend:{ display:false } }, scales:{ x:{ grid:{ display:false, drawBorder:false } }, y:{ beginAtZero:true, grid:{ display:false, drawBorder:false }, ticks:{ display:false } } } }
+    );
+  } catch(e) { console.error("Chart rendering failed:", e); }
+});
+</script>
+<div class="report-container">
+<div class="report-box">
+<div class="vehicle-header" style="background:#FF6B6B;">
+<span class="vehicle-color-pill" style="background:#FF6B6B;"></span>
+Vehicle V1
+<button id="vehicle-body-0-btn" class="toggle-btn" onclick="toggleVehicleBody('vehicle-body-0')">▼</button>
+</div>
+<div id="vehicle-body-0" class="vehicle-body">
+<table>
+<thead><tr><th class="num">No</th><th>ID</th><th>Name</th><th class="num">Time (min)</th><th class="num">Time (cum, min)</th><th class="num">Distance (km)</th><th class="num">Distance (cum, km)</th><th class="num">Demand</th></tr></thead>
+<tbody>
+<tr>
+<td class="num">1</td>
+<td>A</td>
+<td>Start</td>
+<td class="num">N/A</td>
+<td class="num">N/A</td>
+<td class="num">N/A</td>
+<td class="num">N/A</td>
+<td class="num"></td>
+</tr>
+<tr>
+<td class="num">2</td>
+<td>B</td>
+<td>Stop1</td>
+<td class="num">6.8</td>
+<td class="num">6.8</td>
+<td class="num">1.03</td>
+<td class="num">1.03</td>
+<td class="num"></td>
+</tr>
+</tbody></table>
+<div class="summary">Total distance: 1.50 km | Total time: 10 min</div>
+</div>
+</div>
+<div class="report-box">
+<div class="vehicle-header" style="background:#4ECDC4;">
+<span class="vehicle-color-pill" style="background:#4ECDC4;"></span>
+Vehicle V2
+<button id="vehicle-body-1-btn" class="toggle-btn" onclick="toggleVehicleBody('vehicle-body-1')">▼</button>
+</div>
+<div id="vehicle-body-1" class="vehicle-body">
+<table>
+<thead><tr><th class="num">No</th><th>ID</th><th>Name</th><th class="num">Time (min)</th><th class="num">Time (cum, min)</th><th class="num">Distance (km)</th><th class="num">Distance (cum, km)</th><th class="num">Demand</th></tr></thead>
+<tbody>
+<tr>
+<td class="num">1</td>
+<td>C</td>
+<td>Start2</td>
+<td class="num">N/A</td>
+<td class="num">N/A</td>
+<td class="num">N/A</td>
+<td class="num">N/A</td>
+<td class="num"></td>
+</tr>
+<tr>
+<td class="num">2</td>
+<td>D</td>
+<td>Stop2</td>
+<td class="num">3.3</td>
+<td class="num">3.3</td>
+<td class="num">0.47</td>
+<td class="num">0.47</td>
+<td class="num"></td>
+</tr>
+</tbody></table>
+<div class="summary">Total distance: 1.20 km | Total time: 8 min</div>
+</div>
+</div>
+</div>
+</body></html>
