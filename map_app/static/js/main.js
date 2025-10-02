@@ -25,7 +25,7 @@ function withProjectId(input, init) {
 
 const map = new mapboxgl.Map({
     container: 'map',
-    style: 'mapbox://styles/mapbox/light-v11',
+    style: 'mapbox://styles/mapbox/streets-v11',
     center: [126.9779, 37.5547],
     zoom: 11
 });

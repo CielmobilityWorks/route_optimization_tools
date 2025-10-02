@@ -155,11 +155,100 @@ def load_data(project_id: str | None = None):
         for encoding in encodings_to_try:
             try:
                 df = pd.read_csv(locations_file, encoding=encoding)
+                # 열 이름 공백 제거 및 불필요 열 제거
+                df.columns = df.columns.str.strip()
+                df = df.loc[:, ~df.columns.str.startswith('Unnamed')]
+
+                # 중복 ID 컬럼(id.1 등) 처리
+                if 'id.1' in df.columns:
+                    if 'id' not in df.columns:
+                        df['id'] = ''
+                    df['id'] = df['id'].astype(str).replace({'nan': '', 'None': ''}).fillna('')
+                    df['id.1'] = df['id.1'].astype(str).replace({'nan': '', 'None': ''}).fillna('')
+                    empty_mask = df['id'].str.strip() == ''
+                    df.loc[empty_mask, 'id'] = df.loc[empty_mask, 'id.1']
+                    df = df.drop(columns=['id.1'])
+
+                # 기대하는 열만 유지하고 부족한 열은 채워넣기
+                expected_columns = ['id', 'name', 'lon', 'lat', 'demand']
+                for col in expected_columns:
+                    if col not in df.columns:
+                        df[col] = np.nan
+                df = df[expected_columns]
+
+                # 데이터 타입 정규화
+                df['id'] = df['id'].fillna('').astype(str)
+                if 'name' in df.columns:
+                    df['name'] = df['name'].fillna('').astype(str)
+                if 'demand' in df.columns:
+                    df['demand'] = pd.to_numeric(df['demand'], errors='coerce').fillna(0).astype(int)
+                for coord_col in ('lon', 'lat'):
+                    if coord_col in df.columns:
+                        df[coord_col] = pd.to_numeric(df[coord_col], errors='coerce')
+
+                # ID 중복/빈값 처리: 최초 로드 시에도 일관된 규칙 적용
+                df['id'] = df['id'].fillna('').astype(str).str.strip()
+                observed_ids: set[str] = set()
+                empty_assigned = 0
+                duplicate_sources: list[str] = []
+                modified_ids = False
+
+                for idx, current_id in df['id'].items():
+                    if not current_id:
+                        # 빈값 → Depot(첫 행)이면 '1', 나머지는 새 ID 부여
+                        if idx == 0 and '1' not in observed_ids:
+                            new_id = '1'
+                        else:
+                            new_id = None
+                            attempts = 0
+                            while attempts < 20:
+                                candidate = generate_short_id(4)
+                                if candidate not in observed_ids:
+                                    new_id = candidate
+                                    break
+                                attempts += 1
+                            if new_id is None:
+                                # 예외적으로 모든 후보가 겹치면 UUID fallback
+                                import uuid
+                                new_id = uuid.uuid4().hex[:4].upper()
+                        df.at[idx, 'id'] = new_id
+                        observed_ids.add(new_id)
+                        empty_assigned += 1
+                        modified_ids = True
+                        continue
+
+                    if current_id in observed_ids:
+                        # 중복 → 새로운 ID로 치환하되, 기존 값 기록
+                        duplicate_sources.append(current_id)
+                        new_id = None
+                        attempts = 0
+                        while attempts < 20:
+                            candidate = generate_short_id(4)
+                            if candidate not in observed_ids:
+                                new_id = candidate
+                                break
+                            attempts += 1
+                        if new_id is None:
+                            import uuid
+                            new_id = uuid.uuid4().hex[:4].upper()
+                        df.at[idx, 'id'] = new_id
+                        observed_ids.add(new_id)
+                        modified_ids = True
+                    else:
+                        observed_ids.add(current_id)
+
+                if duplicate_sources:
+                    print(f"⚠️ locations.csv에서 중복된 ID를 감지하여 재할당했습니다: {duplicate_sources}")
+                if empty_assigned:
+                    print(f"ℹ️ locations.csv에 비어 있는 ID {empty_assigned}개에 랜덤 값을 부여했습니다.")
+                if modified_ids:
+                    try:
+                        save_data(df, project_id)
+                        print("💾 ID 정규화 결과를 locations.csv에 즉시 반영했습니다.")
+                    except Exception as persist_error:
+                        print(f"⚠️ ID 정규화 내용을 저장하지 못했습니다: {persist_error}")
+
                 print(f"CSV 파일을 {encoding} 인코딩으로 로드했습니다.")
-                # id 컬럼을 문자열로 통일하여 이후 비교 및 검색 로직에서 타입 문제를 피합니다.
-                if 'id' in df.columns:
-                    # NaN이 있을 수 있으니 빈 값은 빈 문자열로 변환
-                    df['id'] = df['id'].fillna('').astype(str)
                 return df
             except (UnicodeDecodeError, UnicodeError):
                 continue
@@ -277,8 +366,9 @@ def get_locations():
     """모든 위치 데이터를 JSON 형식으로 반환합니다."""
     pid = get_project_id()
     df = load_data(pid)
-    # CSV 파일에 작성된 순서 그대로 반환 (정렬하지 않음)
-    return jsonify(df.to_dict(orient='records'))
+    # 결측치(NaN)를 None으로 변환하고 그대로의 순서를 유지합니다.
+    records = df.where(pd.notnull(df), None).to_dict(orient='records')
+    return jsonify(records)
 
 @app.route('/api/locations', methods=['POST'])
 def add_location():

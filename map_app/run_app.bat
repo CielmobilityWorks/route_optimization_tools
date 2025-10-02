@@ -5,12 +5,12 @@ echo ==================================================
 
 REM Use existing virtual environment from parent directory
 echo Using existing virtual environment...
-call "..\\.venv\\Scripts\\activate"
+call "..\.venv\Scripts\activate"
 
 REM Check if virtual environment activation was successful
 if %ERRORLEVEL% neq 0 (
     echo Error: Failed to activate virtual environment
-    echo Please make sure the virtual environment exists at ..\\.venv
+    echo Please make sure the virtual environment exists at ..\.venv
     pause
     exit /b 1
 )
