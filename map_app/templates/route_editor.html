@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Route Editor</title>
+
+    <script src="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.js"></script>
+    <link href="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css" rel="stylesheet" />
+
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/route-visualization.css') }}">
+    <script>
+        window.MAPBOX_ACCESS_TOKEN = "{{ mapbox_token }}";
+    </script>
+
+    <style>
+        html, body {
+            height: 100%;
+        }
+        body {
+            margin: 0;
+            padding: 12px;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f5f5f5;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .editor-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #ffffff;
+            padding: 12px 16px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .editor-header h1 {
+            margin: 0;
+            font-size: 18px;
+            color: #333333;
+        }
+        .editor-controls {
+            display: flex;
+            gap: 8px;
+        }
+        .editor-btn {
+            padding: 6px 12px;
+            border: none;
+            border-radius: 4px;
+            font-size: 12px;
+            cursor: pointer;
+            background-color: #007bff;
+            color: #ffffff;
+            transition: background-color 0.3s;
+        }
+        .editor-btn:hover {
+            background-color: #0056b3;
+        }
+        .editor-btn-secondary {
+            background-color: #6c757d;
+        }
+        .editor-btn-secondary:hover {
+            background-color: #545b62;
+        }
+        .editor-map-wrapper {
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+        }
+        #route-map {
+            flex: 1;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+    </style>
+</head>
+<body>
+    <div class="editor-header">
+        <div>
+            <h1>Route Editor</h1>
+        </div>
+        <div class="editor-controls">
+            <button type="button" class="editor-btn" id="route-editor-reload">Reload</button>
+            <button type="button" class="editor-btn editor-btn-secondary" onclick="window.close()">Close</button>
+        </div>
+    </div>
+
+    <div class="editor-map-wrapper">
+        <div id="route-map"></div>
+
+        <!-- Bottom horizontal route editor panel (replaces top-right Route Information) -->
+        <div id="route-bottom-panel" aria-label="Route Editor Bottom Panel">
+            <!-- Header (table-like) -->
+            <div class="rbp-header">
+                <div class="rbp-col rbp-col-check">✓</div>
+                <div class="rbp-col rbp-col-vehicle">Vehicle</div>
+                <div class="rbp-col rbp-col-dist">Dist</div>
+                <div class="rbp-col rbp-col-time">Time</div>
+                <div class="rbp-col rbp-col-load">Load</div>
+                <div class="rbp-col rbp-col-timeline">Timeline</div>
+            </div>
+            <!-- Rows container (populated by route-editor.js) -->
+            <div class="rbp-rows" role="list"></div>
+        </div>
+
+        <style>
+            /* Bottom panel styles specific to the route editor template */
+            #route-bottom-panel {
+                position: fixed;
+                left: 50%;
+                bottom: 25px;
+                transform: translateX(-50%);
+                width: calc(100% - 24px);
+                max-width: 1200px; /* limit overall width */
+                height: 160px;
+                background: rgba(255,255,255,0.98);
+                border-radius: 8px;
+                box-shadow: 0 6px 18px rgba(0,0,0,0.12);
+                z-index: 11000;
+                display: flex;
+                flex-direction: column;
+                gap: 6px;
+                padding: 10px 5px;
+                overflow: hidden;
+                font-size: 12px; /* slightly reduced to fit */
+            }
+
+            /* Use grid for header and rows so columns align precisely */
+            #route-bottom-panel .rbp-row {
+                display: grid;
+                    /* Left block (first 5 columns) total outer width (including padding/border) + gaps = 300px
+                             We keep the total track sum = 276px and gaps = 4*6 = 24px -> total 300px.
+                             Reduce vehicle width and redistribute to Dist/Time/Load for better balance: 22, 90, 56, 70, 38. */
+                         grid-template-columns: 22px 90px 56px 70px 38px 1fr;
+                align-items: center;
+                gap: 6px;
+                min-height: 36px;
+            }
+
+            /* Header (table-like) */
+            #route-bottom-panel .rbp-header {
+                display: grid;
+                grid-template-columns: 22px 90px 56px 70px 38px 1fr;
+                align-items: center;
+                gap: 6px;
+                padding: 6px 5px;
+                border-bottom: 1px solid rgba(0,0,0,0.06);
+                color: #495057;
+                font-weight: 600;
+                font-size: 12px;
+                box-sizing: border-box;
+            }
+
+            #route-bottom-panel .rbp-col { padding: 0 5px; box-sizing: border-box; display:flex; align-items:center; }
+            /* column widths controlled by grid-template-columns above */
+
+            /* Left cells for rows (mimic table columns) */
+            #route-bottom-panel .rbp-left {
+                display: flex;
+                align-items: center;
+                gap: 3px;
+                color: #333;
+                width: auto;
+                flex: 0 0 auto;
+                padding-right: 5px;
+                box-sizing: border-box;
+                border-right: 1px solid rgba(0,0,0,0.06);
+                background-clip: padding-box;
+            }
+
+            #route-bottom-panel .rbp-left .rbp-cell { padding: 0 5px; }
+            /* Widths below match the first five grid tracks (22,90,56,70,38) so left block totals 300px including gaps */
+            #route-bottom-panel .rbp-left .rbp-cell-vehicle { width: 90px; flex: 0 0 90px; font-weight: 600; display:flex; align-items:center; }
+            #route-bottom-panel .rbp-left .rbp-cell-dist { width: 56px; flex: 0 0 56px; color: #666; text-align: right; }
+            #route-bottom-panel .rbp-left .rbp-cell-time { width: 70px; flex: 0 0 70px; color: #666; text-align: right; }
+            #route-bottom-panel .rbp-left .rbp-cell-load { width: 38px; flex: 0 0 38px; color: #666; text-align: right; }
+
+            /* Small color swatch before vehicle name */
+            #route-bottom-panel .rbp-swatch { width: 14px; height: 14px; border-radius: 2px; display: inline-block; margin-right: 6px; flex: 0 0 14px; }
+
+            #route-bottom-panel .rbp-right {
+                flex: 1 1 auto;
+                min-width: 0; /* allow shrinking so left column never overflows */
+                height: 36px;
+                display: flex;
+                align-items: center;
+                overflow-x: auto;
+                padding-right: 5px;
+                padding-left: 5px;
+            }
+
+            /* rows container scroll area */
+            #route-bottom-panel .rbp-rows {
+                overflow-y: auto;
+                max-height: calc(100% - 42px); /* leave space for header */
+            }
+
+            /* center check column in header and rows */
+            .rbp-col-check, .rbp-cell-check { display:flex; align-items:center; justify-content:center; }
+
+            /* Ensure left cells truncate instead of forcing layout expansion */
+            #route-bottom-panel .rbp-left .rbp-cell {
+                padding: 0 5px;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+
+            /* Timeline container (light background) */
+            #route-bottom-panel .rbp-timeline {
+                position: relative;
+                width: 100%;
+                height: 12px;
+                background: linear-gradient(90deg, rgba(0,0,0,0.03), rgba(0,0,0,0.01));
+                border-radius: 4px;
+            }
+
+            /* Colored bar placeholder representing the route/time block */
+            #route-bottom-panel .rbp-bar {
+                position: absolute;
+                left: 0;
+                top: 0;
+                height: 100%;
+                width: 100%; /* full width for placeholder */
+                border-radius: 8px;
+                box-shadow: 0 2px 6px rgba(0,0,0,0.06) inset;
+                opacity: 0.95;
+            }
+
+            /* Header: left-align all header columns (except the check column stays centered) */
+            #route-bottom-panel .rbp-header .rbp-col {
+                text-align: left;
+                padding-left: 5px;
+                justify-content: flex-start;
+            }
+
+            /* Data cells: right-align Dist/Time/Load in rows only */
+            #route-bottom-panel .rbp-rows .rbp-row > .rbp-cell-dist,
+            #route-bottom-panel .rbp-rows .rbp-row > .rbp-cell-time,
+            #route-bottom-panel .rbp-rows .rbp-row > .rbp-cell-load {
+                text-align: right;
+                justify-content: flex-end;
+                padding-right: 5px;
+            }
+
+            /* Vertical separators between columns for header and rows */
+            #route-bottom-panel .rbp-header .rbp-col:not(.rbp-col-timeline) {
+                border-right: 1px solid rgba(0,0,0,0.06);
+                padding-right: 5px;
+                box-sizing: border-box;
+            }
+
+            #route-bottom-panel .rbp-rows .rbp-row > .rbp-cell:not(.rbp-cell-timeline) {
+                border-right: 1px solid rgba(0,0,0,0.04);
+                padding-right: 5px;
+                box-sizing: border-box;
+                display: flex;
+                align-items: center;
+            }
+
+            /* Make check column center-aligned */
+            #route-bottom-panel .rbp-rows .rbp-row > .rbp-cell-check,
+            #route-bottom-panel .rbp-header .rbp-col-check {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding-right: 5px;
+            }
+
+            /* Make rows slightly separated */
+            #route-bottom-panel .rbp-row + .rbp-row {
+                margin-top: 4px;
+            }
+        </style>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/route-visualization.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/route-editor.js') }}"></script>
+</body>
+</html>

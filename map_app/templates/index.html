@@ -361,9 +361,12 @@
                 <button id="route-full-view-button" class="route-action-btn" onclick="openFullRouteVisualization()" title="전체 화면으로 경로 보기">
                     Full View
                 </button>
-                    <button id="route-view-report-button" class="route-action-btn" onclick="openRouteReport()" title="View Route Report">
-                        View Report
-                    </button>
+                <button id="route-view-report-button" class="route-action-btn" onclick="openRouteReport()" title="View Route Report">
+                    View Report
+                </button>
+                <button id="route-edit-button" class="route-action-btn" type="button" title="Edit Route" onclick="openRouteEditor()">
+                    Edit
+                </button>
                 <button class="route-modal-close" onclick="closeRouteViewModal()">&times;</button>
             </div>
         </div>
@@ -450,6 +453,7 @@
 <!-- Route Visualization Module -->
 <script src="{{ url_for('static', filename='js/route-visualization.js') }}"></script>
 <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+<script src="{{ url_for('static', filename='js/route-editor-launcher.js') }}"></script>
 
 <!-- HTML 내보내기 버튼 추가 -->
 <script>

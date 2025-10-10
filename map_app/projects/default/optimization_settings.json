@@ -3,7 +3,7 @@
   "vehicleCapacity": 20,
   "timeLimitSec": 60,
   "primaryObjective": "distance",
-  "tiebreaker1": "distance",
+  "tiebreaker1": "vehicles",
   "tiebreaker2": "none",
   "additionalObjectives": [
     "workloadBalance"

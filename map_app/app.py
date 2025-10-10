@@ -4,6 +4,7 @@ import numpy as np
 import os
 import io
 import json
+import shutil
 import secrets
 import string
 from utils.tmap_utils import create_matrix_from_locations
@@ -298,7 +299,7 @@ def save_optimization_result_to_csv(result, vehicle_count, vehicle_capacity, pro
     # 상세 경로 정보 CSV 저장 (UTF-8 BOM으로 Excel 호환성 확보)
     route_details = []
     # per-route 이전 누적값을 추적하여 정류장별 Load(수요)를 계산
-    # load locations map for id lookup
+    # load locations map for id/name/coords lookup
     try:
         loc_df_for_ids = pd.read_csv(project_path('locations.csv', pid), encoding='utf-8-sig')
     except Exception:
@@ -316,10 +317,21 @@ def save_optimization_result_to_csv(result, vehicle_count, vehicle_capacity, pro
             return str(s).strip().lower()
 
     name_to_id = {}
+    id_to_coords = {}
+    name_to_row = {}
     if not loc_df_for_ids.empty and 'name' in loc_df_for_ids.columns and 'id' in loc_df_for_ids.columns:
         for _, lr in loc_df_for_ids.iterrows():
             try:
-                name_to_id[_normalize_name_for_lookup(lr['name'])] = str(lr['id'])
+                nid = str(lr['id'])
+                norm = _normalize_name_for_lookup(lr['name'])
+                name_to_id[norm] = nid
+                name_to_row[norm] = lr
+                try:
+                    lon = float(lr.get('lon')) if 'lon' in lr and not pd.isna(lr.get('lon')) else None
+                    lat = float(lr.get('lat')) if 'lat' in lr and not pd.isna(lr.get('lat')) else None
+                    id_to_coords[nid] = {'lon': lon, 'lat': lat}
+                except Exception:
+                    id_to_coords[nid] = {'lon': None, 'lat': None}
             except Exception:
                 continue
 
@@ -330,20 +342,57 @@ def save_optimization_result_to_csv(result, vehicle_count, vehicle_capacity, pro
             # depot은 수요 0, 그 외는 (현재 누적 - 이전 누적)
             load_delta = 0 if str(waypoint.get('type')) == 'depot' else max(0, cumulative - prev_cum)
             prev_cum = cumulative
+
+            # Prefer waypoint's own id if present; otherwise fallback to name lookup
+            loc_id = ''
+            try:
+                if waypoint.get('id') is not None and str(waypoint.get('id')) != 'nan' and str(waypoint.get('id')) != '':
+                    loc_id = str(waypoint.get('id'))
+                else:
+                    loc_id = name_to_id.get(_normalize_name_for_lookup(waypoint.get('name')), '')
+            except Exception:
+                loc_id = name_to_id.get(_normalize_name_for_lookup(waypoint.get('name')), '')
+
+            # Attempt to find coordinates for this location (by id or name)
+            loc_lon = ''
+            loc_lat = ''
+            try:
+                if loc_id and loc_id in id_to_coords:
+                    loc_lon = id_to_coords[loc_id].get('lon', '')
+                    loc_lat = id_to_coords[loc_id].get('lat', '')
+                else:
+                    nr = name_to_row.get(_normalize_name_for_lookup(waypoint.get('name')))
+                    if nr is not None:
+                        loc_lon = nr.get('lon', '')
+                        loc_lat = nr.get('lat', '')
+            except Exception:
+                loc_lon = ''
+                loc_lat = ''
+
             route_details.append({
                 'Vehicle_ID': route['vehicle_id'] + 1,
                 'Route_Distance_m': waypoint.get('cumulative_distance', 0),
                 'Route_Time_s': waypoint.get('cumulative_time', 0),
-                'Route_Load': route['load'],
                 'Stop_Order': i + 1,
-                'Location_Name': waypoint['name'],
-                'Location_ID': name_to_id.get(_normalize_name_for_lookup(waypoint.get('name')), ''),
-                'Location_Type': waypoint['type'],
+                'Location_Name': waypoint.get('name', ''),
+                'Location_ID': loc_id,
+                'Location_Lon': loc_lon,
+                'Location_Lat': loc_lat,
+                'Location_Type': waypoint.get('type', ''),
                 'Load': load_delta,
                 'Cumulative_Load': cumulative
             })
     
+    # Explicit column order to ensure stable CSV schema
+    columns = ['Vehicle_ID', 'Route_Distance_m', 'Route_Time_s', 'Stop_Order',
+               'Location_Name', 'Location_ID', 'Location_Lon', 'Location_Lat',
+               'Location_Type', 'Load', 'Cumulative_Load']
     routes_df = pd.DataFrame(route_details)
+    # Ensure all expected columns exist (fill missing with empty values)
+    for col in columns:
+        if col not in routes_df.columns:
+            routes_df[col] = ''
+    routes_df = routes_df[columns]
     try:
         routes_df.to_csv(project_path('optimization_routes.csv', pid), index=False, encoding='utf-8-sig')
         print("상세 경로 파일을 UTF-8-SIG 인코딩으로 저장했습니다.")
@@ -971,6 +1020,13 @@ def route_visualization():
                          current_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                          mapbox_token=mapbox_token)
 
+
+@app.route('/route-editor')
+def route_editor():
+    """경로 편집 전용 페이지"""
+    mapbox_token = os.getenv('MAPBOX_ACCESS_TOKEN')
+    return render_template('route_editor.html', mapbox_token=mapbox_token)
+
 @app.route('/generate-route-html', methods=['POST'])
 def generate_route_html():
     """라우트 데이터를 받아서 완전한 HTML 파일을 생성"""
@@ -1117,22 +1173,70 @@ def get_routes():
     """스마트 경로 로딩: 캐시된 데이터가 있으면 바로 반환, 없으면 생성"""
     try:
         pid = get_project_id()
-        # 1️⃣ 캐시된 경로 파일 확인
-        if os.path.exists(project_path('generated_routes.json', pid)):
-            print("📂 캐시된 경로 데이터 발견, 로딩 중...")
-            
+        source = (request.args.get('source') or 'generated').lower()
+        use_edited = source == 'edited'
+
+        route_filename = 'edited_routes.json' if use_edited else 'generated_routes.json'
+        route_path = project_path(route_filename, pid)
+        generated_path = project_path('generated_routes.json', pid)
+
+        if use_edited and not os.path.exists(route_path):
+            if not os.path.exists(generated_path):
+                msg = 'generated_routes.json 파일이 없어 edited_routes.json을 만들 수 없습니다.'
+                print(f"⚠️ {msg}")
+                return jsonify({'success': False, 'error': msg}), 404
             try:
-                with open(project_path('generated_routes.json', pid), 'r', encoding='utf-8') as f:
+                shutil.copyfile(generated_path, route_path)
+                print(f"📝 편집용 경로 파일 생성: {route_path}")
+            except Exception as copy_error:
+                print(f"❌ 편집용 경로 파일 생성 실패: {copy_error}")
+                return jsonify({'success': False, 'error': f'edited_routes.json 생성 실패: {copy_error}'}), 500
+            # 또한 편집용 CSV가 없으면 optimization_routes.csv를 복사하여 만든다
+            try:
+                edited_csv_path = project_path('edited_routes.csv', pid)
+                optimization_csv_path = project_path('optimization_routes.csv', pid)
+                if not os.path.exists(edited_csv_path):
+                    if os.path.exists(optimization_csv_path):
+                        try:
+                            shutil.copyfile(optimization_csv_path, edited_csv_path)
+                            print(f"📝 편집용 CSV 파일 생성: {edited_csv_path}")
+                        except Exception as csv_copy_err:
+                            print(f"❌ 편집용 CSV 생성 실패: {csv_copy_err}")
+                            # JSON 생성은 성공했더라도 CSV 생성 실패는 치명적이지 않으므로 경고만 남김
+                    else:
+                        print(f"⚠️ optimization_routes.csv가 없어 {edited_csv_path}를 만들 수 없습니다.")
+            except Exception as _csv_err:
+                print(f"⚠️ 편집용 CSV 생성 체크 중 오류: {_csv_err}")
+
+        if os.path.exists(route_path):
+            print(f"📂 캐시된 경로 데이터({route_filename}) 발견, 로딩 중...")
+
+            try:
+                with open(route_path, 'r', encoding='utf-8') as f:
                     cached_data = json.load(f)
-                # 캐시된 vehicle_routes에 route_load나 waypoint.demand가 없을 수 있으므로 보강
                 vehicle_routes = cached_data.get('vehicle_routes', {})
+                # 편집 모드일 때 edited_routes.csv가 없으면 optimization_routes.csv를 복사하여 생성
+                if use_edited:
+                    try:
+                        edited_csv_path = project_path('edited_routes.csv', pid)
+                        optimization_csv_path = project_path('optimization_routes.csv', pid)
+                        if not os.path.exists(edited_csv_path):
+                            if os.path.exists(optimization_csv_path):
+                                try:
+                                    shutil.copyfile(optimization_csv_path, edited_csv_path)
+                                    print(f"📝 편집용 CSV 파일 생성: {edited_csv_path}")
+                                except Exception as csv_copy_err:
+                                    print(f"❌ 편집용 CSV 생성 실패(캐시 로드 시): {csv_copy_err}")
+                            else:
+                                print(f"⚠️ optimization_routes.csv가 없어 {edited_csv_path}를 만들 수 없습니다.")
+                    except Exception as _csv_err:
+                        print(f"⚠️ 편집용 CSV 생성 체크 중 오류(캐시 로드 시): {_csv_err}")
                 try:
                     if os.path.exists(project_path('optimization_routes.csv', pid)):
                         routes_df = pd.read_csv(project_path('optimization_routes.csv', pid), encoding='utf-8-sig')
                         routes_df['Vehicle_ID'] = pd.to_numeric(routes_df['Vehicle_ID'], errors='coerce')
                         routes_df['Stop_Order'] = pd.to_numeric(routes_df['Stop_Order'], errors='coerce')
                         routes_df = routes_df.dropna(subset=['Vehicle_ID', 'Stop_Order'])
-                        # Load 컬럼 보장
                         if 'Load' not in routes_df.columns and 'Cumulative_Load' in routes_df.columns:
                             try:
                                 routes_df['Cumulative_Load'] = pd.to_numeric(routes_df['Cumulative_Load'], errors='coerce').fillna(0).astype(int)
@@ -1150,7 +1254,6 @@ def get_routes():
                                     routes_df.loc[grp_sorted.index, 'Load'] = loads
                             except Exception as _e:
                                 print(f"Load 보강 실패(get_routes): {_e}")
-                        # 차량별 최종 Cumulative_Load 사전 생성
                         final_load_by_vehicle = {}
                         for vid, grp in routes_df.groupby('Vehicle_ID'):
                             grp_sorted = grp.sort_values('Stop_Order')
@@ -1159,7 +1262,7 @@ def get_routes():
                             except Exception:
                                 final_val = 0
                             final_load_by_vehicle[int(vid)] = final_val
-                        # 캐시 데이터 보강: route_load, waypoint.demand
+
                         def _normalize_name_local(s: str | None) -> str:
                             if s is None:
                                 return ''
@@ -1172,7 +1275,6 @@ def get_routes():
                             vid = int(route.get('vehicle_id', key))
                             if 'route_load' not in route or route.get('route_load') in (None, 0):
                                 route['route_load'] = final_load_by_vehicle.get(vid, 0)
-                            # waypoint.demand 주입 (ID 우선, 이름 폴백)
                             try:
                                 grp = routes_df[routes_df['Vehicle_ID'] == vid].sort_values('Stop_Order').copy()
                                 if 'waypoints' in route and isinstance(route['waypoints'], list):
@@ -1181,7 +1283,6 @@ def get_routes():
                                         wp_id = str(wp.get('id', '')) if wp.get('id') is not None else None
                                         wp_name_norm = _normalize_name_local(wp_name)
                                         load_val = 0
-                                        # 1) Location_ID 컬럼이 있으면 ID로 우선 매칭
                                         if 'Location_ID' in grp.columns and wp_id:
                                             matched = grp[grp['Location_ID'].astype(str) == wp_id]
                                             if not matched.empty:
@@ -1191,24 +1292,19 @@ def get_routes():
                                                     continue
                                                 except Exception:
                                                     load_val = 0
-                                        # 2) 동일한 순서의 후보 사용(인덱스 기반)
                                         candidate = grp.iloc[idx] if idx < len(grp) else None
                                         if candidate is not None:
-                                            # ID가 있으면 비교
                                             if 'Location_ID' in candidate and pd.notna(candidate.get('Location_ID')) and wp_id:
                                                 if str(candidate.get('Location_ID')) == wp_id:
                                                     load_val = int(candidate.get('Load', 0) or 0)
                                                     wp['demand'] = load_val
                                                     continue
-                                            # 이름으로 비교 (정규화)
                                             cand_name_norm = _normalize_name_local(candidate.get('Location_Name', ''))
                                             if cand_name_norm and cand_name_norm == wp_name_norm:
                                                 load_val = int(candidate.get('Load', 0) or 0)
                                                 wp['demand'] = load_val
                                                 continue
-                                        # 3) 이름으로 전체 검색 폴백
                                         if 'Location_Name' in grp.columns:
-                                            # normalized match across the group
                                             try:
                                                 matched = grp[grp['Location_Name'].astype(str).apply(lambda x: _normalize_name_local(x) == wp_name_norm)]
                                             except Exception:
@@ -1224,24 +1320,31 @@ def get_routes():
                 except Exception as enrich_error:
                     print(f"⚠️ 캐시 보강 중 오류(Load): {enrich_error}")
 
-                print(f"✅ 캐시된 경로 로드 성공: {len(cached_data.get('vehicle_routes', {}))}개 차량")
-                
+                print(f"✅ 캐시된 경로({route_filename}) 로드 성공: {len(vehicle_routes)}개 차량")
+
                 return jsonify({
                     'success': True,
                     'from_cache': True,
+                    'source': route_filename,
                     'generated_at': cached_data.get('generated_at'),
                     'vehicle_routes': vehicle_routes,
                     'statistics': cached_data.get('statistics', {})
                 })
-                
+
             except Exception as cache_error:
-                print(f"⚠️ 캐시 로드 실패: {cache_error}, T-map으로 새로 생성합니다.")
-                # 캐시 로드 실패 시 아래로 계속 진행해서 새로 생성
-        
-        # 2️⃣ 캐시가 없으면 T-map API로 새로 생성
+                print(f"⚠️ 캐시 로드 실패({route_filename}): {cache_error}")
+                if use_edited:
+                    return jsonify({'success': False, 'error': f'{route_filename} 로드 실패: {cache_error}'}), 500
+                print("T-map으로 새로 생성합니다.")
+
+        if use_edited:
+            msg = 'edited_routes.json 파일이 없습니다. 먼저 경로를 생성하세요.'
+            print(f"⚠️ {msg}")
+            return jsonify({'success': False, 'error': msg}), 404
+
         print("🚀 캐시된 데이터가 없어서 T-map API로 새로 생성합니다...")
         return generate_routes_from_csv_internal()
-        
+
     except Exception as e:
         print(f"❌ 경로 로딩 실패: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -1282,15 +1385,11 @@ def generate_routes_from_csv_internal(options: dict | None = None):
         # CSV 파일들 읽기
         if not os.path.exists(project_path('optimization_routes.csv', pid)):
             return jsonify({'error': 'optimization_routes.csv 파일이 없습니다.'}), 400
-        
-        if not os.path.exists(project_path('locations.csv', pid)):
-            return jsonify({'error': 'locations.csv 파일이 없습니다.'}), 400
-            
+
         print("📁 CSV 파일 읽기 중...")
 
         routes_df = pd.read_csv(project_path('optimization_routes.csv', pid), encoding='utf-8-sig')
-        locations_df = pd.read_csv(project_path('locations.csv', pid), encoding='utf-8-sig')
-        
+
         # 데이터 타입 강제 변환
         routes_df['Vehicle_ID'] = pd.to_numeric(routes_df['Vehicle_ID'], errors='coerce')
         routes_df['Stop_Order'] = pd.to_numeric(routes_df['Stop_Order'], errors='coerce')
@@ -1312,15 +1411,25 @@ def generate_routes_from_csv_internal(options: dict | None = None):
                     routes_df.loc[grp_sorted.index, 'Load'] = loads
             except Exception as _e:
                 print(f"Load 컬럼 생성 실패: {_e}")
-        locations_df['lon'] = pd.to_numeric(locations_df['lon'], errors='coerce')
-        locations_df['lat'] = pd.to_numeric(locations_df['lat'], errors='coerce')
-        
-        # NaN 값 제거
+        # If optimization_routes.csv already contains coordinates, prefer them.
+        use_routes_coords = ('Location_Lon' in routes_df.columns and 'Location_Lat' in routes_df.columns and not routes_df[['Location_Lon','Location_Lat']].isnull().all().all())
+
+        locations_df = None
+        if not use_routes_coords:
+            # fallback to locations.csv when optimization_routes lacks coordinates
+            if not os.path.exists(project_path('locations.csv', pid)):
+                return jsonify({'error': 'optimization_routes.csv에 좌표가 없고 locations.csv 파일이 없습니다.'}), 400
+            locations_df = pd.read_csv(project_path('locations.csv', pid), encoding='utf-8-sig')
+            locations_df['lon'] = pd.to_numeric(locations_df['lon'], errors='coerce')
+            locations_df['lat'] = pd.to_numeric(locations_df['lat'], errors='coerce')
+
+        # NaN 값 제거 (routes는 항상 필요)
         routes_df = routes_df.dropna(subset=['Vehicle_ID', 'Stop_Order'])
-        locations_df = locations_df.dropna(subset=['lon', 'lat'])
-        
-        print(f"📊 Routes 데이터: {len(routes_df)}행, Locations 데이터: {len(locations_df)}행")
-        
+
+        # Locations count for logging
+        locations_count = len(locations_df) if locations_df is not None else 0
+        print(f"📊 Routes 데이터: {len(routes_df)}행, Locations 데이터: {locations_count}행")
+
         # 위치 정보를 딕셔너리로 변환 (ID 우선 조회, name 폴백)
         # location_by_id: id -> location dict
         # location_by_name: name -> location dict (폴백용, 중복 시 첫 항목 사용)
@@ -1334,25 +1443,49 @@ def generate_routes_from_csv_internal(options: dict | None = None):
                 return ' '.join(str(s).strip().lower().split())
             except Exception:
                 return str(s).strip().lower()
-        for _, row in locations_df.iterrows():
-            try:
-                loc_id = str(row['id']) if 'id' in row and row['id'] is not None else None
-                loc_name = str(row['name'])
-                loc_entry = {
-                    'id': loc_id,
-                    'name': loc_name,
-                    'x': float(row['lon']),  # T-map API는 x=경도, y=위도
-                    'y': float(row['lat'])
-                }
-                if loc_id:
-                    location_by_id[loc_id] = loc_entry
-                # name은 중복 가능성이 있으나 폴백 용도로 첫 매치만 사용
-                norm = _normalize_name(loc_name)
-                if norm and norm not in location_by_name:
-                    location_by_name[norm] = loc_entry
-            except (ValueError, TypeError) as e:
-                print(f"위치 데이터 변환 오류: {row.get('name', '')} - {e}")
-                continue
+
+        # If locations_df is None (we have coords in routes_df), build lookup from routes_df
+        if locations_df is None:
+            # Build location entries from unique Location_ID/Location_Name pairs in routes_df
+            for _, row in routes_df.iterrows():
+                try:
+                    loc_id = str(row['Location_ID']) if 'Location_ID' in row and not pd.isna(row.get('Location_ID')) and str(row.get('Location_ID')) != '' else None
+                    loc_name = str(row.get('Location_Name', ''))
+                    lon = row.get('Location_Lon', None) if 'Location_Lon' in row else None
+                    lat = row.get('Location_Lat', None) if 'Location_Lat' in row else None
+                    if lon is None or (isinstance(lon, float) and pd.isna(lon)):
+                        lon = None
+                    if lat is None or (isinstance(lat, float) and pd.isna(lat)):
+                        lat = None
+                    entry = {'id': loc_id, 'name': loc_name, 'x': float(lon) if lon not in (None, '') else None, 'y': float(lat) if lat not in (None, '') else None}
+                    if loc_id is not None:
+                        location_by_id[loc_id] = entry
+                    norm = _normalize_name(loc_name)
+                    if norm and norm not in location_by_name:
+                        location_by_name[norm] = entry
+                except Exception as e:
+                    print(f"routes_df location conversion error: {e}")
+                    continue
+        else:
+            for _, row in locations_df.iterrows():
+                try:
+                    loc_id = str(row['id']) if 'id' in row and row['id'] is not None else None
+                    loc_name = str(row['name'])
+                    loc_entry = {
+                        'id': loc_id,
+                        'name': loc_name,
+                        'x': float(row['lon']),  # T-map API는 x=경도, y=위도
+                        'y': float(row['lat'])
+                    }
+                    if loc_id:
+                        location_by_id[loc_id] = loc_entry
+                    # name은 중복 가능성이 있으나 폴백 용도로 첫 매치만 사용
+                    norm = _normalize_name(loc_name)
+                    if norm and norm not in location_by_name:
+                        location_by_name[norm] = loc_entry
+                except (ValueError, TypeError) as e:
+                    print(f"위치 데이터 변환 오류: {row.get('name', '')} - {e}")
+                    continue
 
         print(f"📍 위치 딕셔너리 생성 완료: {len(location_by_id)}개 id, {len(location_by_name)}개 name(폴백)")
         

@@ -60,6 +60,7 @@ function initializeStandaloneRouteMap() {
             console.warn('Error removing existing map:', error);
         }
         routeVisualizationMap = null;
+        window.routeVisualizationMap = null;
     }
 
     try {
@@ -71,6 +72,7 @@ function initializeStandaloneRouteMap() {
             zoom: 11,
             attributionControl: true
         });
+        window.routeVisualizationMap = routeVisualizationMap;
 
         // 지도 로드 완료 후 추가 초기화
         routeVisualizationMap.on('load', () => {
