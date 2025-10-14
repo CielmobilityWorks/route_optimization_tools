@@ -1,0 +1,12 @@
+{
+  "last_generated": "2025-10-14T16:41:09.324244",
+  "route_count": 6,
+  "total_distance_m": 157043.0,
+  "total_time_s": 48695.0,
+  "route_options": {
+    "searchOption": "17",
+    "carType": "3",
+    "viaTime": "60",
+    "startTime": "202510141641"
+  }
+}

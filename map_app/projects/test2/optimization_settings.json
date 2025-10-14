@@ -2,11 +2,9 @@
   "vehicleCount": 2,
   "vehicleCapacity": 40,
   "timeLimitSec": 60,
-  "primaryObjective": "time",
-  "tiebreaker1": "makespan",
-  "tiebreaker2": "vehicles",
-  "additionalObjectives": [
-    "workloadBalance"
-  ],
+  "primaryObjective": "distance",
+  "tiebreaker1": "vehicles",
+  "tiebreaker2": "none",
+  "additionalObjectives": [],
   "routeMode": "FREE_START_DEPOT_END"
 }
