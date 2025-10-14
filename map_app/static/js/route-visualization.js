@@ -452,17 +452,17 @@ function displayAndManageRoutes(vehicleRoutes, mapInstance) {
                     markerElement.setAttribute('data-vehicle-id', vehicleId);
                     markerElement.setAttribute('data-marker-type', 'depot');
                     markerElement.style.cssText = `
-                        width: 35px;
-                        height: 35px;
+                        width: 24px;
+                        height: 24px;
                         background-color: ${isStart ? '#28a745' : '#dc3545'};
-                        border: 3px solid white;
-                        border-radius: 4px;
+                        border: 2px solid white;
+                        border-radius: 3px;
                         display: flex;
                         align-items: center;
                         justify-content: center;
                         color: white;
                         font-weight: bold;
-                        font-size: 10px;
+                        font-size: 9px;
                         box-shadow: 0 2px 6px rgba(0,0,0,0.4);
                     `;
                     markerElement.textContent = isStart ? 'START' : 'END';
@@ -486,14 +486,14 @@ function displayAndManageRoutes(vehicleRoutes, mapInstance) {
 
                 // 팝업 생성
                 const popupContent = isDepot 
-                    ? `<div style="font-size: 14px;">
+                    ? `<div style="font-size: 12px;">
                          <strong>🏢 DEPOT</strong><br>
                          <strong>${waypoint.name}</strong><br>
                          <span style="color: ${isStart ? '#28a745' : '#dc3545'};">
                            ${isStart ? '🚀 출발지' : '🏁 도착지'}
                          </span>
                        </div>`
-                    : `<div style="font-size: 14px;">
+                    : `<div style="font-size: 12px;">
                          <strong>🚏 정류장 ${index}</strong><br>
                          <strong>${waypoint.name}</strong><br>
                          수요량: ${waypoint.demand || 0}

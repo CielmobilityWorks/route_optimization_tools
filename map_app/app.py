@@ -7,6 +7,7 @@ import json
 import shutil
 import secrets
 import string
+from datetime import datetime
 from utils.tmap_utils import create_matrix_from_locations
 from utils.report_generator import generate_standalone_route_html
 from dotenv import load_dotenv
@@ -53,11 +54,104 @@ def ensure_project_dir(project_id: str) -> str:
     os.makedirs(proj_dir, exist_ok=True)
     return proj_dir
 
-def project_path(filename: str, project_id: str | None = None) -> str:
-    """프로젝트 전용 파일 경로를 생성합니다."""
+def project_path(filename: str, project_id: str | None = None, edit_id: str | None = None) -> str:
+    """프로젝트 전용 파일 경로를 생성합니다. edit_id가 주어지면 edit 폴더 내의 파일 경로를 반환합니다."""
     pid = project_id or get_project_id()
     proj_dir = ensure_project_dir(pid)
+    
+    if edit_id:
+        # edit 폴더 경로 생성
+        edit_dir = os.path.join(proj_dir, edit_id)
+        os.makedirs(edit_dir, exist_ok=True)
+        return os.path.join(edit_dir, filename)
+    
     return os.path.join(proj_dir, filename)
+
+def get_edit_id() -> str | None:
+    """요청에서 editId를 추출(쿼리/헤더)하고 없으면 None 반환."""
+    try:
+        eid = request.args.get('editId') or request.headers.get('X-Edit-Id')
+        return eid if eid else None
+    except Exception:
+        return None
+
+def ensure_edit_dir(project_id: str, edit_id: str) -> str:
+    """edit 디렉터리를 보장하고 경로를 반환합니다."""
+    proj_dir = ensure_project_dir(project_id)
+    edit_dir = os.path.join(proj_dir, edit_id)
+    os.makedirs(edit_dir, exist_ok=True)
+    return edit_dir
+
+def list_edit_folders(project_id: str) -> list[str]:
+    """프로젝트 내의 모든 edit 폴더를 반환합니다 (edit01, edit02 등)."""
+    proj_dir = ensure_project_dir(project_id)
+    edit_folders = []
+    
+    if not os.path.exists(proj_dir):
+        return edit_folders
+    
+    for name in os.listdir(proj_dir):
+        full_path = os.path.join(proj_dir, name)
+        # edit로 시작하고 디렉터리인지 확인
+        if os.path.isdir(full_path) and name.startswith('edit') and len(name) > 4:
+            try:
+                # edit 뒤에 숫자가 있는지 확인
+                num_part = name[4:]
+                int(num_part)
+                edit_folders.append(name)
+            except ValueError:
+                continue
+    
+    # 숫자 순서대로 정렬
+    edit_folders.sort(key=lambda x: int(x[4:]))
+    return edit_folders
+
+def get_next_edit_id(project_id: str) -> str:
+    """다음 edit 폴더 ID를 생성합니다 (edit01, edit02, ...)."""
+    existing_edits = list_edit_folders(project_id)
+    
+    if not existing_edits:
+        return 'edit01'
+    
+    # 마지막 edit의 번호를 추출하고 1 증가
+    last_edit = existing_edits[-1]
+    last_num = int(last_edit[4:])
+    next_num = last_num + 1
+    
+    return f'edit{next_num:02d}'
+
+
+def load_route_metadata(project_id: str | None = None) -> dict:
+    """프로젝트의 route_metadata.json을 로드하여 dict로 반환합니다. 파일 없으면 빈 dict 반환."""
+    pid = project_id or get_project_id()
+    path = project_path('route_metadata.json', pid)
+    try:
+        if os.path.exists(path):
+            with open(path, 'r', encoding='utf-8') as f:
+                return json.load(f) or {}
+    except Exception as e:
+        print(f"⚠️ Failed to load route metadata for {pid}: {e}")
+    return {}
+
+
+def save_route_metadata(payload: dict, project_id: str | None = None) -> None:
+    """프로젝트의 route_metadata.json에 payload를 병합하여 저장합니다."""
+    pid = project_id or get_project_id()
+    path = project_path('route_metadata.json', pid)
+    try:
+        # 기존 메타데이터 병합
+        existing = {}
+        if os.path.exists(path):
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    existing = json.load(f) or {}
+            except Exception:
+                existing = {}
+        merged = {**existing, **payload}
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(merged, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"⚠️ Failed to save route metadata for {pid}: {e}")
 
 def migrate_root_files_to_default():
     """루트에 있는 기존 파일들을 projects/default로 이동(최초 1회).
@@ -91,6 +185,101 @@ def migrate_root_files_to_default():
 
 # 앱 시작 시 마이그레이션 수행
 migrate_root_files_to_default()
+
+# 편집 시나리오(edit 폴더) 관리 API
+@app.route('/api/edits', methods=['GET'])
+def list_edits():
+    """프로젝트 내의 모든 편집 시나리오 목록을 반환합니다."""
+    try:
+        pid = get_project_id()
+        edit_folders = list_edit_folders(pid)
+        
+        # 각 edit 폴더의 메타데이터 수집
+        edits = []
+        for edit_id in edit_folders:
+            edit_info = {
+                'id': edit_id,
+                'has_csv': os.path.exists(project_path('edited_routes.csv', pid, edit_id)),
+                'has_json': os.path.exists(project_path('edited_routes.json', pid, edit_id))
+            }
+            edits.append(edit_info)
+        
+        return jsonify({'success': True, 'edits': edits})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/edits', methods=['POST'])
+def create_edit():
+    """새로운 편집 시나리오를 생성합니다."""
+    try:
+        pid = get_project_id()
+        data = request.get_json(silent=True) or {}
+        
+        # edit ID 결정 (지정되지 않으면 자동 생성)
+        edit_id = data.get('editId')
+        if not edit_id:
+            edit_id = get_next_edit_id(pid)
+        
+        # edit 폴더 생성
+        edit_dir = ensure_edit_dir(pid, edit_id)
+        
+        # 복사할 소스 결정
+        source_edit_id = data.get('sourceEditId')
+        
+        if source_edit_id:
+            # 이전 edit 폴더에서 복사
+            source_csv = project_path('edited_routes.csv', pid, source_edit_id)
+            source_json = project_path('edited_routes.json', pid, source_edit_id)
+            source_metadata = project_path('edited_routes_metadata.json', pid, source_edit_id)
+            
+            if os.path.exists(source_csv):
+                shutil.copy2(source_csv, project_path('edited_routes.csv', pid, edit_id))
+            if os.path.exists(source_json):
+                shutil.copy2(source_json, project_path('edited_routes.json', pid, edit_id))
+            if os.path.exists(source_metadata):
+                shutil.copy2(source_metadata, project_path('edited_routes_metadata.json', pid, edit_id))
+        else:
+            # 최초 생성: optimization_routes.csv와 generated_routes.json 복사
+            opt_csv = project_path('optimization_routes.csv', pid)
+            gen_json = project_path('generated_routes.json', pid)
+            
+            if os.path.exists(opt_csv):
+                shutil.copy2(opt_csv, project_path('edited_routes.csv', pid, edit_id))
+            if os.path.exists(gen_json):
+                shutil.copy2(gen_json, project_path('edited_routes.json', pid, edit_id))
+            
+            # 초기 메타데이터 생성 (빈 해시로 시작하여 첫 reload에서 모든 차량을 재생성하도록)
+            metadata_path = project_path('edited_routes_metadata.json', pid, edit_id)
+            initial_metadata = {
+                'vehicle_hashes': {},
+                'last_updated': None,
+                'created_at': datetime.now().isoformat(),
+                'description': 'Initial edit scenario created from optimization results'
+            }
+            with open(metadata_path, 'w', encoding='utf-8') as f:
+                json.dump(initial_metadata, f, ensure_ascii=False, indent=2)
+            print(f"✅ 초기 메타데이터 생성: {metadata_path}")
+        
+        return jsonify({'success': True, 'editId': edit_id}), 201
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/edits/<edit_id>', methods=['DELETE'])
+def delete_edit(edit_id: str):
+    """편집 시나리오를 삭제합니다."""
+    try:
+        pid = get_project_id()
+        edit_dir = os.path.join(ensure_project_dir(pid), edit_id)
+        
+        if not os.path.exists(edit_dir):
+            return jsonify({'success': False, 'error': 'Edit not found'}), 404
+        
+        # edit 폴더 전체 삭제
+        shutil.rmtree(edit_dir)
+        
+        return jsonify({'success': True, 'message': f'Edit {edit_id} deleted'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 # 프로젝트 목록 조회/생성 API
 @app.route('/api/projects', methods=['GET'])
@@ -1173,11 +1362,12 @@ def get_routes():
     """스마트 경로 로딩: 캐시된 데이터가 있으면 바로 반환, 없으면 생성"""
     try:
         pid = get_project_id()
+        edit_id = get_edit_id()  # editId 파라미터 추출
         source = (request.args.get('source') or 'generated').lower()
         use_edited = source == 'edited'
 
         route_filename = 'edited_routes.json' if use_edited else 'generated_routes.json'
-        route_path = project_path(route_filename, pid)
+        route_path = project_path(route_filename, pid, edit_id)
         generated_path = project_path('generated_routes.json', pid)
 
         if use_edited and not os.path.exists(route_path):
@@ -1193,7 +1383,7 @@ def get_routes():
                 return jsonify({'success': False, 'error': f'edited_routes.json 생성 실패: {copy_error}'}), 500
             # 또한 편집용 CSV가 없으면 optimization_routes.csv를 복사하여 만든다
             try:
-                edited_csv_path = project_path('edited_routes.csv', pid)
+                edited_csv_path = project_path('edited_routes.csv', pid, edit_id)
                 optimization_csv_path = project_path('optimization_routes.csv', pid)
                 if not os.path.exists(edited_csv_path):
                     if os.path.exists(optimization_csv_path):
@@ -1218,7 +1408,7 @@ def get_routes():
                 # 편집 모드일 때 edited_routes.csv가 없으면 optimization_routes.csv를 복사하여 생성
                 if use_edited:
                     try:
-                        edited_csv_path = project_path('edited_routes.csv', pid)
+                        edited_csv_path = project_path('edited_routes.csv', pid, edit_id)
                         optimization_csv_path = project_path('optimization_routes.csv', pid)
                         if not os.path.exists(edited_csv_path):
                             if os.path.exists(optimization_csv_path):
@@ -1232,8 +1422,11 @@ def get_routes():
                     except Exception as _csv_err:
                         print(f"⚠️ 편집용 CSV 생성 체크 중 오류(캐시 로드 시): {_csv_err}")
                 try:
-                    if os.path.exists(project_path('optimization_routes.csv', pid)):
-                        routes_df = pd.read_csv(project_path('optimization_routes.csv', pid), encoding='utf-8-sig')
+                    # edited 모드일 때는 edited_routes.csv를, 아니면 optimization_routes.csv를 읽음
+                    csv_filename = 'edited_routes.csv' if use_edited else 'optimization_routes.csv'
+                    csv_path = project_path(csv_filename, pid, edit_id if use_edited else None)
+                    if os.path.exists(csv_path):
+                        routes_df = pd.read_csv(csv_path, encoding='utf-8-sig')
                         routes_df['Vehicle_ID'] = pd.to_numeric(routes_df['Vehicle_ID'], errors='coerce')
                         routes_df['Stop_Order'] = pd.to_numeric(routes_df['Stop_Order'], errors='coerce')
                         routes_df = routes_df.dropna(subset=['Vehicle_ID', 'Stop_Order'])
@@ -1366,11 +1559,24 @@ def generate_routes_from_csv_internal(options: dict | None = None):
     try:
         pid = get_project_id()
         options = options or {}
-        # 문자열로 보장
-        opt_search = options.get('searchOption')
-        opt_car = options.get('carType')
-        opt_via = options.get('viaTime')
-        opt_start = options.get('startTime')
+        # 우선, 프로젝트 metadata의 route_options를 로드하여 기본값으로 사용
+        metadata = load_route_metadata(pid)
+        saved_opts = metadata.get('route_options', {}) if isinstance(metadata, dict) else {}
+
+        # Merge: 함수 인자로 전달된 options가 우선. 전달되지 않은 값은 saved_opts에서 가져옴.
+        merged_opts = {}
+        for k in ('searchOption', 'carType', 'viaTime', 'startTime'):
+            if k in options and options.get(k) not in (None, ''):
+                merged_opts[k] = str(options.get(k))
+            elif k in saved_opts and saved_opts.get(k) not in (None, ''):
+                merged_opts[k] = str(saved_opts.get(k))
+            else:
+                merged_opts[k] = None
+
+        opt_search = merged_opts.get('searchOption')
+        opt_car = merged_opts.get('carType')
+        opt_via = merged_opts.get('viaTime')
+        opt_start = merged_opts.get('startTime')
         if opt_search is not None:
             opt_search = str(opt_search)
         if opt_car is not None:
@@ -1381,6 +1587,7 @@ def generate_routes_from_csv_internal(options: dict | None = None):
             opt_start = str(opt_start)
         
         print("🚀 경로 생성 시작...")
+        print(f"📋 사용할 경로 옵션: searchOption={opt_search}, carType={opt_car}, viaTime={opt_via}, startTime={opt_start}")
         
         # CSV 파일들 읽기
         if not os.path.exists(project_path('optimization_routes.csv', pid)):
@@ -1587,31 +1794,48 @@ def generate_routes_from_csv_internal(options: dict | None = None):
                     candidate_id = via_id_candidates[i] if i < len(via_id_candidates) else None
                     vp = resolve_location_by_id_or_name(candidate_id or name)
                     via_points.append(vp)
-                # demand 주입: routes_df의 Load 값을 name 기준으로 매칭 (동일 이름 다회 출현 가능성 낮다고 가정)
+                # demand, cumulative_time, cumulative_distance 주입: routes_df의 Load, Route_Time_s, Route_Distance_m 값을 Stop_Order 순서로 매칭
                 try:
-                    # name -> Load 매핑 리스트를 Stop_Order 순서로 뽑아냄
-                    loads_seq = vehicle_data[['Location_Name', 'Location_Type', 'Load']].to_dict('records')
-                    # 출발지/경유지/도착지 각각에 demand 세팅
-                    def find_first_load(name, loc_type):
-                        for rec in loads_seq:
+                    # name -> Load, Route_Time_s, Route_Distance_m 매핑 리스트를 Stop_Order 순서로 뽑아냄
+                    detail_seq = vehicle_data[['Location_Name', 'Location_Type', 'Load', 'Route_Time_s', 'Route_Distance_m']].to_dict('records')
+                    # 출발지/경유지/도착지 각각에 demand, cumulative_time, cumulative_distance 세팅
+                    def find_first_detail(name, loc_type):
+                        for rec in detail_seq:
                             if str(rec['Location_Name']) == str(name) and str(rec.get('Location_Type', '')) == str(loc_type):
-                                return int(rec.get('Load', 0) or 0)
+                                return {
+                                    'demand': int(rec.get('Load', 0) or 0),
+                                    'cumulative_time': float(rec.get('Route_Time_s', 0) or 0),
+                                    'cumulative_distance': float(rec.get('Route_Distance_m', 0) or 0)
+                                }
                         # 타입이 다를 수 있으니 이름만 매칭하는 폴백
-                        for rec in loads_seq:
+                        for rec in detail_seq:
                             if str(rec['Location_Name']) == str(name):
-                                return int(rec.get('Load', 0) or 0)
-                        return 0
+                                return {
+                                    'demand': int(rec.get('Load', 0) or 0),
+                                    'cumulative_time': float(rec.get('Route_Time_s', 0) or 0),
+                                    'cumulative_distance': float(rec.get('Route_Distance_m', 0) or 0)
+                                }
+                        return {'demand': 0, 'cumulative_time': 0, 'cumulative_distance': 0}
                     # 출발지(depot or waypoint)
-                    start_point['demand'] = find_first_load(start_name, vehicle_data.iloc[0].get('Location_Type', ''))
+                    start_detail = find_first_detail(start_name, vehicle_data.iloc[0].get('Location_Type', ''))
+                    start_point['demand'] = start_detail['demand']
+                    start_point['cumulative_time'] = start_detail['cumulative_time']
+                    start_point['cumulative_distance'] = start_detail['cumulative_distance']
                     # 경유지들(waypoint)
                     for i, vp in enumerate(via_points):
                         loc_name = via_names[i]
                         # 해당 via의 타입은 보통 waypoint
-                        vp['demand'] = find_first_load(loc_name, 'waypoint')
+                        via_detail = find_first_detail(loc_name, 'waypoint')
+                        vp['demand'] = via_detail['demand']
+                        vp['cumulative_time'] = via_detail['cumulative_time']
+                        vp['cumulative_distance'] = via_detail['cumulative_distance']
                     # 도착지(depot or waypoint)
-                    end_point['demand'] = find_first_load(end_name, vehicle_data.iloc[-1].get('Location_Type', ''))
+                    end_detail = find_first_detail(end_name, vehicle_data.iloc[-1].get('Location_Type', ''))
+                    end_point['demand'] = end_detail['demand']
+                    end_point['cumulative_time'] = end_detail['cumulative_time']
+                    end_point['cumulative_distance'] = end_detail['cumulative_distance']
                 except Exception as _inject_e:
-                    print(f"demand 주입 중 오류(V{vehicle_id}): {_inject_e}")
+                    print(f"상세 정보 주입 중 오류(V{vehicle_id}): {_inject_e}")
                 
             except (ValueError, TypeError) as e:
                 print(f"Vehicle ID 변환 오류: {vehicle_id} - {e}")
@@ -1631,14 +1855,14 @@ def generate_routes_from_csv_internal(options: dict | None = None):
                 # and estimate distance/time so the vehicle still has a usable result.
                 if via_points:
                     route_result = tmap_router.get_route(
-                        start_point,
-                        end_point,
-                        via_points,
-                        searchOption=opt_search,
-                        start_time=opt_start,
-                        carType=opt_car,
-                        viaTime=opt_via
-                    )
+                            start_point,
+                            end_point,
+                            via_points,
+                            searchOption=opt_search,
+                            start_time=opt_start,
+                            carType=opt_car,
+                            viaTime=opt_via
+                        )
                 else:
                     # Try OSRM for single-leg routing first (road network based).
                     try:
@@ -1701,6 +1925,19 @@ def generate_routes_from_csv_internal(options: dict | None = None):
                     # 실제 방문 순서: 출발지 -> 경유지들 -> 도착지
                     all_waypoints = [start_point] + via_points + [end_point]
                     
+                    # Add cumulative_time and cumulative_distance to waypoints
+                    total_route_time = float(route_result.get('properties', {}).get('totalTime', 0))
+                    total_route_distance = float(route_result.get('properties', {}).get('totalDistance', 0))
+                    
+                    # If waypoints don't have cumulative_time, calculate them
+                    for i, waypoint in enumerate(all_waypoints):
+                        if 'cumulative_time' not in waypoint:
+                            # Distribute time proportionally across waypoints
+                            waypoint['cumulative_time'] = (i / max(1, len(all_waypoints) - 1)) * total_route_time
+                        if 'cumulative_distance' not in waypoint:
+                            # Distribute distance proportionally across waypoints
+                            waypoint['cumulative_distance'] = (i / max(1, len(all_waypoints) - 1)) * total_route_distance
+                    
                     # 차량 경로 정보 저장
                     vehicle_routes[str(vehicle_id)] = {
                         'vehicle_id': int(vehicle_id),
@@ -1713,8 +1950,8 @@ def generate_routes_from_csv_internal(options: dict | None = None):
                             'coordinates': unique_coords
                         },
                         'properties': route_result.get('properties', {}),
-                        'total_distance': float(route_result.get('properties', {}).get('totalDistance', 0)),
-                        'total_time': float(route_result.get('properties', {}).get('totalTime', 0)),
+                        'total_distance': total_route_distance,
+                        'total_time': total_route_time,
                         # 누적 Load의 최종값 (차량별)
                         'route_load': final_cum_load
                     }
@@ -1775,13 +2012,15 @@ def generate_routes_from_csv_internal(options: dict | None = None):
                 'last_generated': datetime.now().isoformat(),
                 'route_count': len(vehicle_routes),
                 'total_distance_m': total_distance,
-                'total_time_s': total_time
+                'total_time_s': total_time,
+                'route_options': merged_opts  # 사용된 경로 옵션 저장
             }
             
             with open(project_path('route_metadata.json', pid), 'w', encoding='utf-8') as f:
                 json.dump(metadata, f, ensure_ascii=False, indent=2)
                 
             print(f"💾 경로 데이터 저장 완료: {project_path('generated_routes.json', pid)}")
+            print(f"💾 메타데이터 저장 완료 (route_options 포함): {project_path('route_metadata.json', pid)}")
             # If a per-project HTML report exists, remove it so next View Report regenerates it
             try:
                 report_file = project_path('route_report.html', pid)
@@ -1831,13 +2070,595 @@ def check_route_cache():
                 'has_cache': False,
                 'message': '캐시된 경로 데이터 없음'
             })
-            
     except Exception as e:
         return jsonify({
             'has_cache': False,
             'message': f'캐시 상태 확인 오류: {str(e)}'
         })
 
+@app.route('/api/route-metadata', methods=['GET'])
+def get_route_metadata():
+    """프로젝트의 route_metadata.json을 반환합니다 (route_options 포함)"""
+    try:
+        pid = get_project_id()
+        metadata = load_route_metadata(pid)
+        return jsonify({
+            'success': True,
+            'metadata': metadata
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'metadata': {}
+        }), 500
+
+@app.route('/regenerate-edited-routes', methods=['POST'])
+
+@app.route('/regenerate-edited-routes', methods=['POST'])
+def regenerate_edited_routes():
+    """edited_routes.csv를 읽어서 변경된 차량만 T-map으로 경로를 재생성하여 edited_routes.json에 병합"""
+    import hashlib
+    
+    try:
+        pid = get_project_id()
+        edit_id = get_edit_id()  # editId 파라미터 추출
+        edited_csv_path = project_path('edited_routes.csv', pid, edit_id)
+        edited_json_path = project_path('edited_routes.json', pid, edit_id)
+        metadata_path = project_path('edited_routes_metadata.json', pid, edit_id)
+        
+        if not os.path.exists(edited_csv_path):
+            return jsonify({'success': False, 'error': 'edited_routes.csv 파일이 없습니다.'}), 404
+        
+        print("🔄 edited_routes.csv 변경 감지 및 증분 경로 재생성 시작...")
+        
+        # 요청 본문에서 옵션 읽기
+        request_data = request.get_json() or {}
+        provided_options = request_data.get('options', {}) if isinstance(request_data, dict) else {}
+        # 프로젝트 route_metadata의 route_options와 병합하여 최종 options 생성
+        project_meta = load_route_metadata(pid)
+        existing_opts = project_meta.get('route_options', {}) if isinstance(project_meta, dict) else {}
+        options = {}
+        for k in ('searchOption', 'carType', 'viaTime', 'startTime'):
+            if k in provided_options and provided_options.get(k) not in (None, ''):
+                options[k] = str(provided_options.get(k))
+            elif k in existing_opts and existing_opts.get(k) not in (None, ''):
+                options[k] = str(existing_opts.get(k))
+            else:
+                options[k] = None
+        # 전달된 옵션이 있으면 프로젝트 메타데이터에 기록
+        if provided_options:
+            save_route_metadata({'route_options': options}, pid)
+            print(f"💾 제공된 옵션을 메타데이터에 저장했습니다: {options}")
+        
+        print(f"📋 사용할 경로 옵션: searchOption={options.get('searchOption')}, carType={options.get('carType')}, viaTime={options.get('viaTime')}, startTime={options.get('startTime')}")
+        
+        # edited_routes.csv 읽기
+        routes_df = pd.read_csv(edited_csv_path, encoding='utf-8-sig')
+        routes_df['Vehicle_ID'] = pd.to_numeric(routes_df['Vehicle_ID'], errors='coerce')
+        routes_df['Stop_Order'] = pd.to_numeric(routes_df['Stop_Order'], errors='coerce')
+        routes_df = routes_df.dropna(subset=['Vehicle_ID', 'Stop_Order'])
+        
+        # Load 컬럼이 없을 경우 Cumulative_Load 차분으로 생성
+        if 'Load' not in routes_df.columns:
+            try:
+                routes_df['Cumulative_Load'] = pd.to_numeric(routes_df['Cumulative_Load'], errors='coerce').fillna(0).astype(int)
+                routes_df['Load'] = 0
+                for vid, grp in routes_df.groupby('Vehicle_ID'):
+                    grp_sorted = grp.sort_values('Stop_Order').copy()
+                    prev = 0
+                    loads = []
+                    for _, r in grp_sorted.iterrows():
+                        loc_type = str(r.get('Location_Type', ''))
+                        cum = int(r.get('Cumulative_Load', 0) or 0)
+                        delta = 0 if loc_type == 'depot' else max(0, cum - prev)
+                        loads.append(delta)
+                        prev = cum
+                    routes_df.loc[grp_sorted.index, 'Load'] = loads
+            except Exception as e:
+                print(f"Load 컬럼 생성 실패: {e}")
+        
+        # 차량별 해시 계산 함수
+        def compute_vehicle_hash(vehicle_df):
+            """차량의 경로 데이터를 기반으로 해시 계산"""
+            relevant_cols = ['Vehicle_ID', 'Stop_Order', 'Location_ID', 'Location_Name', 
+                           'Location_Lon', 'Location_Lat', 'Load', 'Location_Type']
+            available_cols = [col for col in relevant_cols if col in vehicle_df.columns]
+            sorted_df = vehicle_df[available_cols].sort_values('Stop_Order').copy()
+            
+            # 좌표 정밀도를 소수점 6자리로 반올림 (약 10cm 정밀도)
+            if 'Location_Lon' in sorted_df.columns:
+                sorted_df['Location_Lon'] = sorted_df['Location_Lon'].round(6)
+            if 'Location_Lat' in sorted_df.columns:
+                sorted_df['Location_Lat'] = sorted_df['Location_Lat'].round(6)
+            
+            data_str = sorted_df.to_csv(index=False)
+            return hashlib.md5(data_str.encode()).hexdigest()
+        
+        # 현재 CSV의 차량별 해시 계산
+        current_hashes = {}
+        unique_vehicles = routes_df['Vehicle_ID'].unique()
+        
+        for vehicle_id in unique_vehicles:
+            try:
+                vehicle_id_int = int(vehicle_id)
+                vehicle_data = routes_df[routes_df['Vehicle_ID'] == vehicle_id_int].copy()
+                current_hash = compute_vehicle_hash(vehicle_data)
+                current_hashes[str(vehicle_id_int)] = current_hash
+            except Exception as e:
+                print(f"Vehicle {vehicle_id} 해시 계산 오류: {e}")
+                continue
+        
+        # 이전 메타데이터 읽기
+        previous_hashes = {}
+        if os.path.exists(metadata_path):
+            try:
+                with open(metadata_path, 'r', encoding='utf-8') as f:
+                    metadata = json.load(f)
+                    previous_hashes = metadata.get('vehicle_hashes', {})
+                print(f"📋 이전 메타데이터 로드: {len(previous_hashes)}개 차량")
+                
+                # 디버깅: 해시 비교
+                print("🔍 해시 비교:")
+                for vid in sorted(set(list(current_hashes.keys()) + list(previous_hashes.keys()))):
+                    curr = current_hashes.get(vid, 'N/A')
+                    prev = previous_hashes.get(vid, 'N/A')
+                    match = "✓" if curr == prev else "✗"
+                    print(f"   Vehicle {vid}: {match} (현재: {curr[:8]}... / 이전: {prev[:8] if prev != 'N/A' else 'N/A'}...)")
+            except Exception as e:
+                print(f"⚠️ 메타데이터 로드 실패: {e}")
+        
+        # 변경된 차량 식별
+        changed_vehicles = []
+        new_vehicles = []
+        unchanged_vehicles = []
+        
+        for vehicle_id_str, current_hash in current_hashes.items():
+            if vehicle_id_str not in previous_hashes:
+                new_vehicles.append(vehicle_id_str)
+            elif previous_hashes[vehicle_id_str] != current_hash:
+                changed_vehicles.append(vehicle_id_str)
+            else:
+                unchanged_vehicles.append(vehicle_id_str)
+        
+        # 삭제된 차량
+        deleted_vehicles = [v for v in previous_hashes.keys() if v not in current_hashes]
+        
+        vehicles_to_regenerate = changed_vehicles + new_vehicles
+        
+        print(f"📊 변경 감지 결과:")
+        print(f"   - 신규 차량: {len(new_vehicles)}개 {new_vehicles}")
+        print(f"   - 변경된 차량: {len(changed_vehicles)}개 {changed_vehicles}")
+        print(f"   - 변경 없음: {len(unchanged_vehicles)}개 {unchanged_vehicles}")
+        print(f"   - 삭제된 차량: {len(deleted_vehicles)}개 {deleted_vehicles}")
+        print(f"   → 재생성 대상: {len(vehicles_to_regenerate)}개 차량")
+        
+        # 기존 edited_routes.json 읽기
+        existing_vehicle_routes = {}
+        if os.path.exists(edited_json_path):
+            try:
+                with open(edited_json_path, 'r', encoding='utf-8') as f:
+                    existing_data = json.load(f)
+                    existing_vehicle_routes = existing_data.get('vehicle_routes', {})
+                print(f"📂 기존 JSON 로드: {len(existing_vehicle_routes)}개 차량")
+            except Exception as e:
+                print(f"⚠️ 기존 JSON 로드 실패: {e}")
+        
+        # 변경 없는 차량은 기존 데이터 유지
+        vehicle_routes = {}
+        for vehicle_id_str in unchanged_vehicles:
+            if vehicle_id_str in existing_vehicle_routes:
+                vehicle_routes[vehicle_id_str] = existing_vehicle_routes[vehicle_id_str]
+                print(f"♻️  Vehicle {vehicle_id_str}: 기존 데이터 재사용")
+        
+        # 첫 실행 (메타데이터 없음) + 기존 JSON 있음 → baseline 생성
+        if not previous_hashes and len(existing_vehicle_routes) > 0 and len(vehicles_to_regenerate) == len(current_hashes):
+            print("ℹ️  첫 실행 감지: 기존 JSON을 baseline으로 사용하고 메타데이터 생성")
+            
+            # 기존 JSON의 모든 차량을 그대로 사용
+            vehicle_routes = existing_vehicle_routes
+            
+            # 메타데이터만 생성하고 종료
+            with open(metadata_path, 'w', encoding='utf-8') as f:
+                json.dump({
+                    'vehicle_hashes': current_hashes,
+                    'last_updated': datetime.now().isoformat()
+                }, f, ensure_ascii=False, indent=2)
+            
+            print(f"✅ Baseline 메타데이터 생성 완료: {len(current_hashes)}개 차량")
+            
+            return jsonify({
+                'success': True,
+                'vehicle_routes': vehicle_routes,
+                'route_count': len(vehicle_routes),
+                'regenerated_count': 0,
+                'reused_count': len(vehicle_routes),
+                'deleted_count': 0,
+                'message': f'Baseline 생성: {len(vehicle_routes)}개 차량 등록 완료'
+            })
+        
+        # 변경된 차량이 없으면 조기 반환
+        if len(vehicles_to_regenerate) == 0:
+            print("✅ 변경된 차량이 없습니다. 재생성을 건너뜁니다.")
+            
+            if deleted_vehicles:
+                result_data = {
+                    'vehicle_routes': vehicle_routes,
+                    'generated_at': datetime.now().isoformat(),
+                    'route_count': len(vehicle_routes)
+                }
+                
+                with open(edited_json_path, 'w', encoding='utf-8') as f:
+                    json.dump(result_data, f, ensure_ascii=False, indent=2)
+                
+                with open(metadata_path, 'w', encoding='utf-8') as f:
+                    json.dump({
+                        'vehicle_hashes': current_hashes,
+                        'last_updated': datetime.now().isoformat()
+                    }, f, ensure_ascii=False, indent=2)
+                
+                print(f"🗑️  삭제된 차량 제거 완료: {deleted_vehicles}")
+            
+            return jsonify({
+                'success': True,
+                'vehicle_routes': vehicle_routes,
+                'route_count': len(vehicle_routes),
+                'regenerated_count': 0,
+                'reused_count': len(unchanged_vehicles),
+                'deleted_count': len(deleted_vehicles),
+                'message': '변경사항이 없어 재생성을 건너뛰었습니다.'
+            })
+        
+        # 여기서부터는 변경된 차량만 재생성
+        # 좌표 정보 확인
+        use_routes_coords = ('Location_Lon' in routes_df.columns and 'Location_Lat' in routes_df.columns 
+                            and not routes_df[['Location_Lon','Location_Lat']].isnull().all().all())
+        
+        locations_df = None
+        if not use_routes_coords:
+            locations_csv_path = project_path('locations.csv', pid)
+            if not os.path.exists(locations_csv_path):
+                return jsonify({'success': False, 'error': 'edited_routes.csv에 좌표가 없고 locations.csv 파일이 없습니다.'}), 400
+            locations_df = pd.read_csv(locations_csv_path, encoding='utf-8-sig')
+            locations_df['lon'] = pd.to_numeric(locations_df['lon'], errors='coerce')
+            locations_df['lat'] = pd.to_numeric(locations_df['lat'], errors='coerce')
+        
+        # 위치 정보 딕셔너리 생성
+        location_by_id = {}
+        location_by_name = {}
+        
+        def _normalize_name(s: str | None) -> str:
+            if s is None:
+                return ''
+            try:
+                return ' '.join(str(s).strip().lower().split())
+            except Exception:
+                return str(s).strip().lower()
+        
+        if locations_df is None:
+            for _, row in routes_df.iterrows():
+                try:
+                    loc_id = str(row['Location_ID']) if 'Location_ID' in row and not pd.isna(row.get('Location_ID')) and str(row.get('Location_ID')) != '' else None
+                    loc_name = str(row.get('Location_Name', ''))
+                    lon = row.get('Location_Lon', None) if 'Location_Lon' in row else None
+                    lat = row.get('Location_Lat', None) if 'Location_Lat' in row else None
+                    if lon is None or (isinstance(lon, float) and pd.isna(lon)):
+                        lon = None
+                    if lat is None or (isinstance(lat, float) and pd.isna(lat)):
+                        lat = None
+                    entry = {'id': loc_id, 'name': loc_name, 'x': float(lon) if lon not in (None, '') else None, 'y': float(lat) if lat not in (None, '') else None}
+                    if loc_id is not None:
+                        location_by_id[loc_id] = entry
+                    norm = _normalize_name(loc_name)
+                    if norm and norm not in location_by_name:
+                        location_by_name[norm] = entry
+                except Exception as e:
+                    print(f"routes_df location conversion error: {e}")
+                    continue
+        else:
+            for _, row in locations_df.iterrows():
+                try:
+                    loc_id = str(row['id']) if 'id' in row and row['id'] is not None else None
+                    loc_name = str(row['name'])
+                    loc_entry = {
+                        'id': loc_id,
+                        'name': loc_name,
+                        'x': float(row['lon']),
+                        'y': float(row['lat'])
+                    }
+                    if loc_id:
+                        location_by_id[loc_id] = loc_entry
+                    norm = _normalize_name(loc_name)
+                    if norm and norm not in location_by_name:
+                        location_by_name[norm] = loc_entry
+                except (ValueError, TypeError) as e:
+                    print(f"위치 데이터 변환 오류: {row.get('name', '')} - {e}")
+                    continue
+        
+        print(f"📍 위치 딕셔너리 생성 완료: {len(location_by_id)}개 id, {len(location_by_name)}개 name")
+        
+        # T-map 라우터 초기화
+        tmap_router = TmapRoute()
+        
+        # 변경된 차량만 경로 생성
+        regenerated_count = 0
+        failed_vehicles = []
+        
+        for vehicle_id_str in vehicles_to_regenerate:
+            try:
+                vehicle_id = int(vehicle_id_str)
+                vehicle_data = routes_df[routes_df['Vehicle_ID'] == vehicle_id].copy()
+                vehicle_data = vehicle_data.sort_values('Stop_Order')
+                
+                if vehicle_data.empty or len(vehicle_data) < 2:
+                    print(f"Vehicle {vehicle_id}: 유효한 경로가 없습니다.")
+                    failed_vehicles.append(vehicle_id_str)
+                    continue
+                
+                start_row = vehicle_data.iloc[0]
+                end_row = vehicle_data.iloc[-1]
+                via_rows = vehicle_data.iloc[1:-1]
+                
+                def get_location(row):
+                    loc_id = str(row.get('Location_ID', '')) if 'Location_ID' in row and not pd.isna(row.get('Location_ID')) else None
+                    loc_name = str(row.get('Location_Name', ''))
+                    
+                    if loc_id and loc_id in location_by_id:
+                        return location_by_id[loc_id]
+                    
+                    norm_name = _normalize_name(loc_name)
+                    if norm_name in location_by_name:
+                        return location_by_name[norm_name]
+                    
+                    return None
+                
+                start_loc = get_location(start_row)
+                end_loc = get_location(end_row)
+                via_locs = [get_location(row) for _, row in via_rows.iterrows()]
+                
+                if not start_loc or not end_loc:
+                    print(f"Vehicle {vehicle_id}: 시작 또는 도착 위치 정보를 찾을 수 없습니다.")
+                    failed_vehicles.append(vehicle_id_str)
+                    continue
+                
+                if None in via_locs:
+                    print(f"Vehicle {vehicle_id}: 경유지 위치 정보 중 일부를 찾을 수 없습니다.")
+                    failed_vehicles.append(vehicle_id_str)
+                    continue
+                
+                print(f"🚗 Vehicle {vehicle_id}: T-map 경로 요청 중...")
+                
+                route_result = tmap_router.get_route(
+                    start_point=start_loc,
+                    end_point=end_loc,
+                    via_points=via_locs,
+                    searchOption=options.get('searchOption', '0'),
+                    carType=options.get('carType', '0'),
+                    viaTime=options.get('viaTime', '0'),
+                    start_time=options.get('startTime')
+                )
+                
+                if not route_result:
+                    print(f"Vehicle {vehicle_id}: T-map 경로 생성 실패")
+                    failed_vehicles.append(vehicle_id_str)
+                    continue
+                
+                # 경로 데이터 처리 (generated_routes.json과 동일한 형식)
+                if 'features' in route_result and route_result['features']:
+                    # 경로 좌표 추출
+                    route_coordinates = []
+                    for feature in route_result['features']:
+                        if feature['geometry']['type'] == 'LineString':
+                            coords = feature['geometry']['coordinates']
+                            route_coordinates.extend(coords)
+                    
+                    # 중복 좌표 제거
+                    unique_coords = []
+                    for coord in route_coordinates:
+                        if not unique_coords or coord != unique_coords[-1]:
+                            unique_coords.append(coord)
+                    
+                    # 실제 방문 순서: 출발지 -> 경유지들 -> 도착지
+                    all_waypoints = [start_loc] + via_locs + [end_loc]
+                    
+                    # 총 거리/시간
+                    total_route_time = float(route_result.get('properties', {}).get('totalTime', 0))
+                    total_route_distance = float(route_result.get('properties', {}).get('totalDistance', 0))
+                    
+                    # waypoints에 cumulative_time과 cumulative_distance 추가
+                    for i, waypoint in enumerate(all_waypoints):
+                        if 'cumulative_time' not in waypoint:
+                            waypoint['cumulative_time'] = (i / max(1, len(all_waypoints) - 1)) * total_route_time
+                        if 'cumulative_distance' not in waypoint:
+                            waypoint['cumulative_distance'] = (i / max(1, len(all_waypoints) - 1)) * total_route_distance
+                        # CSV의 Load 정보 추가
+                        matching_row = vehicle_data.iloc[i] if i < len(vehicle_data) else vehicle_data.iloc[-1]
+                        waypoint['demand'] = int(matching_row.get('Load', 0))
+                    
+                    # 차량 경로 정보 저장 (generated_routes.json 형식)
+                    vehicle_routes[vehicle_id_str] = {
+                        'vehicle_id': int(vehicle_id),
+                        'start_point': start_loc,
+                        'end_point': end_loc,
+                        'via_points': via_locs,
+                        'waypoints': all_waypoints,
+                        'route_geometry': {
+                            'type': 'LineString',
+                            'coordinates': unique_coords
+                        },
+                        'properties': route_result.get('properties', {}),
+                        'total_distance': total_route_distance,
+                        'total_time': total_route_time,
+                        'route_load': int(vehicle_data['Cumulative_Load'].max()) if 'Cumulative_Load' in vehicle_data.columns else 0
+                    }
+                    
+                    regenerated_count += 1
+                    print(f"✅ Vehicle {vehicle_id}: 경로 재생성 완료")
+                else:
+                    print(f"Vehicle {vehicle_id}: 경로 데이터가 비어있습니다.")
+                    failed_vehicles.append(vehicle_id_str)
+                    continue
+                
+            except Exception as e:
+                print(f"Vehicle {vehicle_id_str} 경로 생성 오류: {e}")
+                import traceback
+                traceback.print_exc()
+                failed_vehicles.append(vehicle_id_str)
+                continue
+        
+        # edited_routes.json에 저장
+        result_data = {
+            'vehicle_routes': vehicle_routes,
+            'generated_at': datetime.now().isoformat(),
+            'route_count': len(vehicle_routes)
+        }
+        
+        with open(edited_json_path, 'w', encoding='utf-8') as f:
+            json.dump(result_data, f, ensure_ascii=False, indent=2)
+        
+        # 메타데이터 저장
+        with open(metadata_path, 'w', encoding='utf-8') as f:
+            json.dump({
+                'vehicle_hashes': current_hashes,
+                'last_updated': datetime.now().isoformat()
+            }, f, ensure_ascii=False, indent=2)
+        
+        print(f"✅ edited_routes.json 저장 완료: {len(vehicle_routes)}개 차량")
+        print(f"📊 재생성: {regenerated_count}개, 재사용: {len(unchanged_vehicles)}개, 실패: {len(failed_vehicles)}개")
+        
+        return jsonify({
+            'success': True,
+            'vehicle_routes': vehicle_routes,
+            'route_count': len(vehicle_routes),
+            'regenerated_count': regenerated_count,
+            'reused_count': len(unchanged_vehicles),
+            'deleted_count': len(deleted_vehicles),
+            'failed_count': len(failed_vehicles),
+            'failed_vehicles': failed_vehicles,
+            'message': f'{regenerated_count}개 차량 경로가 재생성되고 {len(unchanged_vehicles)}개는 재사용되었습니다.'
+        })
+        
+    except Exception as e:
+        print(f"❌ 경로 재생성 오류: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/update-stop-location', methods=['POST'])
+def update_stop_location():
+    """특정 정류장의 위치(위도, 경도)를 업데이트합니다.
+    
+    Request JSON:
+    {
+        "stopId": "정류장 ID",
+        "lat": 새로운 위도,
+        "lon": 새로운 경도
+    }
+    """
+    try:
+        pid = get_project_id()
+        eid = get_edit_id()
+        
+        if not eid:
+            return jsonify({'success': False, 'error': 'editId가 필요합니다.'}), 400
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({'success': False, 'error': '요청 데이터가 필요합니다.'}), 400
+        
+        stop_id = data.get('stopId')
+        new_lat = data.get('lat')
+        new_lon = data.get('lon')
+        
+        if not stop_id or new_lat is None or new_lon is None:
+            return jsonify({'success': False, 'error': 'stopId, lat, lon이 모두 필요합니다.'}), 400
+        
+        # 위도, 경도 타입 검증 및 변환
+        try:
+            new_lat = float(new_lat)
+            new_lon = float(new_lon)
+        except (ValueError, TypeError):
+            return jsonify({'success': False, 'error': '위도와 경도는 숫자여야 합니다.'}), 400
+        
+        # edited_routes.csv 파일 경로
+        csv_path = project_path('edited_routes.csv', pid, eid)
+        
+        if not os.path.exists(csv_path):
+            return jsonify({'success': False, 'error': 'edited_routes.csv 파일을 찾을 수 없습니다.'}), 404
+        
+        # CSV 파일 로드
+        df = pd.read_csv(csv_path, encoding='utf-8-sig')
+        
+        # 컬럼명 확인 (대소문자 구분 없이 처리)
+        columns_lower = {col.lower(): col for col in df.columns}
+        
+        # ID 컬럼 찾기 (Location_ID 또는 id)
+        id_col = None
+        for possible_name in ['location_id', 'id', 'locationid']:
+            if possible_name in columns_lower:
+                id_col = columns_lower[possible_name]
+                break
+        
+        if not id_col:
+            return jsonify({'success': False, 'error': f'ID 컬럼을 찾을 수 없습니다. 사용 가능한 컬럼: {list(df.columns)}'}), 400
+        
+        # 위도 컬럼 찾기 (Location_Lat 또는 lat)
+        lat_col = None
+        for possible_name in ['location_lat', 'lat', 'latitude']:
+            if possible_name in columns_lower:
+                lat_col = columns_lower[possible_name]
+                break
+        
+        if not lat_col:
+            return jsonify({'success': False, 'error': f'위도 컬럼을 찾을 수 없습니다. 사용 가능한 컬럼: {list(df.columns)}'}), 400
+        
+        # 경도 컬럼 찾기 (Location_Lon 또는 lon)
+        lon_col = None
+        for possible_name in ['location_lon', 'lon', 'longitude']:
+            if possible_name in columns_lower:
+                lon_col = columns_lower[possible_name]
+                break
+        
+        if not lon_col:
+            return jsonify({'success': False, 'error': f'경도 컬럼을 찾을 수 없습니다. 사용 가능한 컬럼: {list(df.columns)}'}), 400
+        
+        # ID를 문자열로 변환하여 비교
+        df[id_col] = df[id_col].astype(str)
+        stop_id = str(stop_id)
+        
+        # 해당 정류장 찾기
+        matching_rows = df[id_col] == stop_id
+        
+        if not matching_rows.any():
+            return jsonify({'success': False, 'error': f'ID가 {stop_id}인 정류장을 찾을 수 없습니다.'}), 404
+        
+        # 위치 업데이트
+        df.loc[matching_rows, lat_col] = new_lat
+        df.loc[matching_rows, lon_col] = new_lon
+        
+        # CSV 파일 저장
+        df.to_csv(csv_path, index=False, encoding='utf-8-sig')
+        
+        updated_count = matching_rows.sum()
+        
+        print(f"✅ 정류장 위치 업데이트 완료: ID={stop_id}, {lat_col}={new_lat}, {lon_col}={new_lon}, 업데이트된 행={updated_count}")
+        
+        return jsonify({
+            'success': True,
+            'message': f'정류장 {stop_id}의 위치가 업데이트되었습니다.',
+            'stopId': stop_id,
+            'lat': new_lat,
+            'lon': new_lon,
+            'updatedRows': int(updated_count)
+        })
+        
+    except Exception as e:
+        print(f"❌ 정류장 위치 업데이트 오류: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 if __name__ == '__main__':
     app.run(debug=True)
     # app.run(debug=True,host='192.168.0.114', port=5000)
+

@@ -85,7 +85,7 @@ class TmapRoute:
             carType=carType if carType is not None else "3",
             viaTime=viaTime if viaTime is not None else "60"
         )
-        
+
         try:
             response = requests.post(
                 f"{self.base_url}?version=1",
@@ -94,14 +94,201 @@ class TmapRoute:
                 timeout=30
             )
             response.raise_for_status()
-            
+
             result = response.json()
-            
+
             if 'error' in result:
                 raise ValueError(f"T-map API Error: {result['error']}")
-            
+
+            # --- Post-process response: try to extract per-feature time/distance and
+            # annotate provided waypoint dicts (start_point, via_points, end_point)
+            # with 'cumulative_time' (seconds) and 'cumulative_distance' (meters)
+            try:
+                # Resolve features array from common locations in response
+                data = result if isinstance(result, dict) else {}
+
+                features = []
+                if isinstance(data.get('features'), list):
+                    features = data.get('features')
+                elif isinstance(data.get('route'), dict) and isinstance(data['route'].get('features'), list):
+                    features = data['route']['features']
+
+                # helper to extract numeric time/distance from a properties dict
+                def _get_time_from_props(props: dict) -> float:
+                    if not isinstance(props, dict):
+                        return 0.0
+                    for key in ('totalTime', 'totalTimeS', 'time', 'duration'):
+                        if key in props:
+                            try:
+                                return float(props.get(key) or 0)
+                            except Exception:
+                                try:
+                                    return float(props.get(key, 0))
+                                except Exception:
+                                    return 0.0
+                    # nested summary
+                    if 'summary' in props and isinstance(props['summary'], dict):
+                        for key in ('duration', 'totalTime', 'time'):
+                            if key in props['summary']:
+                                try:
+                                    return float(props['summary'].get(key) or 0)
+                                except Exception:
+                                    return 0.0
+                    return 0.0
+
+                def _get_distance_from_props(props: dict) -> float:
+                    if not isinstance(props, dict):
+                        return 0.0
+                    for key in ('totalDistance', 'totalDistanceM', 'distance'):
+                        if key in props:
+                            try:
+                                return float(props.get(key) or 0)
+                            except Exception:
+                                return 0.0
+                    if 'summary' in props and isinstance(props['summary'], dict):
+                        for key in ('distance', 'totalDistance'):
+                            if key in props['summary']:
+                                try:
+                                    return float(props['summary'].get(key) or 0)
+                                except Exception:
+                                    return 0.0
+                    return 0.0
+
+                # Build route_coordinates and per-feature cumulative time/distance
+                route_coords = []
+                feature_times = []
+                feature_distances = []
+                for feat in features:
+                    geom = feat.get('geometry') if isinstance(feat, dict) else None
+                    props = feat.get('properties') if isinstance(feat, dict) else {}
+                    coords = []
+                    if isinstance(geom, dict) and geom.get('type') == 'LineString' and isinstance(geom.get('coordinates'), list):
+                        coords = geom.get('coordinates')
+                    # append coords (keep duplicates; we'll dedupe later)
+                    feature_time = _get_time_from_props(props)
+                    feature_dist = _get_distance_from_props(props)
+                    feature_times.append(feature_time)
+                    feature_distances.append(feature_dist)
+                    route_coords.append(coords)
+
+                # Flatten coordinates sequence and compute cumulative arrays
+                flat_coords = []
+                for coords in route_coords:
+                    for c in coords:
+                        flat_coords.append(c)
+
+                # remove consecutive duplicates
+                unique_coords = []
+                for c in flat_coords:
+                    if not unique_coords or unique_coords[-1] != c:
+                        unique_coords.append(c)
+
+                # If no features/time info, fallback to top-level properties
+                total_time = 0.0
+                total_dist = 0.0
+                top_props = data.get('properties') if isinstance(data.get('properties'), dict) else {}
+                total_time = float(top_props.get('totalTime') or top_props.get('time') or 0) if top_props else 0.0
+                total_dist = float(top_props.get('totalDistance') or top_props.get('distance') or 0) if top_props else 0.0
+
+                # If feature_times sum is zero but top-level has total_time, distribute
+                if sum(feature_times) == 0 and total_time > 0 and len(features) > 0:
+                    # distribute proportional to number of coords per feature
+                    counts = [max(1, len(feat.get('geometry', {}).get('coordinates', []))) if isinstance(feat.get('geometry'), dict) else 1 for feat in features]
+                    total_counts = sum(counts)
+                    for i, cnt in enumerate(counts):
+                        feature_times[i] = total_time * (cnt / total_counts) if total_counts > 0 else 0.0
+                if sum(feature_distances) == 0 and total_dist > 0 and len(features) > 0:
+                    counts = [max(1, len(feat.get('geometry', {}).get('coordinates', []))) if isinstance(feat.get('geometry'), dict) else 1 for feat in features]
+                    total_counts = sum(counts)
+                    for i, cnt in enumerate(counts):
+                        feature_distances[i] = total_dist * (cnt / total_counts) if total_counts > 0 else 0.0
+
+                # Build cumulative lists per unique coordinate by distributing each feature's time across its internal segments
+                cumulative_time_per_coord = []
+                cumulative_dist_per_coord = []
+                cum_time = 0.0
+                cum_dist = 0.0
+                for fi, coords in enumerate(route_coords):
+                    if not coords:
+                        continue
+                    ft = float(feature_times[fi] or 0.0)
+                    fd = float(feature_distances[fi] or 0.0)
+                    seg_count = max(1, len(coords) - 1)
+                    time_per_seg = ft / seg_count if seg_count > 0 else 0.0
+                    dist_per_seg = fd / seg_count if seg_count > 0 else 0.0
+                    for idx_in_feat, _coord in enumerate(coords):
+                        # avoid duplicating the first coordinate of a feature if it's the same as last of unique_coords
+                        if cumulative_time_per_coord and _coord == unique_coords[len(cumulative_time_per_coord)-1]:
+                            continue
+                        cumulative_time_per_coord.append(cum_time)
+                        cumulative_dist_per_coord.append(cum_dist)
+                        if idx_in_feat < seg_count:
+                            cum_time += time_per_seg
+                            cum_dist += dist_per_seg
+
+                # Ensure final coordinate has final totals
+                if cumulative_time_per_coord and (len(cumulative_time_per_coord) < len(unique_coords)):
+                    # pad remaining with final cum values
+                    while len(cumulative_time_per_coord) < len(unique_coords):
+                        cumulative_time_per_coord.append(cum_time)
+                        cumulative_dist_per_coord.append(cum_dist)
+
+                # Find nearest coordinate index helper (euclidean approx)
+                def _closest_index(coord_list, target):
+                    if not coord_list or not target:
+                        return 0
+                    tx, ty = float(target[0]), float(target[1])
+                    best_i = 0
+                    best_d = float('inf')
+                    for i, c in enumerate(coord_list):
+                        try:
+                            dx = float(c[0]) - tx
+                            dy = float(c[1]) - ty
+                            d = dx*dx + dy*dy
+                            if d < best_d:
+                                best_d = d
+                                best_i = i
+                        except Exception:
+                            continue
+                    return best_i
+
+                # Annotate waypoints (in-place) with cumulative_time/cumulative_distance
+                all_points = [start_point] + list(via_points or []) + [end_point]
+                if unique_coords and cumulative_time_per_coord:
+                    for i, wp in enumerate(all_points):
+                        try:
+                            tx = wp.get('x')
+                            ty = wp.get('y')
+                            if tx is None or ty is None:
+                                continue
+                            nearest = _closest_index(unique_coords, [tx, ty])
+                            # guard index range
+                            if nearest < 0:
+                                nearest = 0
+                            if nearest >= len(cumulative_time_per_coord):
+                                nearest = len(cumulative_time_per_coord) - 1
+                            wp['cumulative_time'] = float(cumulative_time_per_coord[nearest])
+                            wp['cumulative_distance'] = float(cumulative_dist_per_coord[nearest])
+                            # if start_time provided in YYYYMMDDHHMM format, compute ISO arrival time
+                            if start_time and isinstance(start_time, str) and len(start_time) >= 12:
+                                try:
+                                    from datetime import datetime, timedelta
+                                    # try parse common format YYYYMMDDHHMM
+                                    start_dt = datetime.strptime(start_time[:12], '%Y%m%d%H%M')
+                                    arrival_dt = start_dt + timedelta(seconds=float(wp['cumulative_time'] or 0))
+                                    wp['arrival_time'] = arrival_dt.isoformat()
+                                except Exception:
+                                    # ignore parsing errors
+                                    pass
+                        except Exception:
+                            continue
+
+            except Exception as _post_e:
+                # non-fatal: if post-processing fails, still return raw result
+                print(f"⚠️ Tmap response post-processing warning: {_post_e}")
+
             return result
-            
+
         except requests.RequestException as e:
             raise requests.RequestException(f"API 요청 실패: {str(e)}")
         except json.JSONDecodeError as e:

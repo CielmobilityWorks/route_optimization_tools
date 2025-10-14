@@ -1286,23 +1286,62 @@ function closeRouteViewModal() {
 }
 
 // Route Settings Popup 제어
-function openRouteSettingsPopup() {
+async function openRouteSettingsPopup() {
     const popup = document.getElementById('route-settings-popup');
     if (!popup) return;
     
-    // 기본값 설정
-    // searchoption 기본: 교통최적+추천
-    const defaultSearch = document.querySelector('input[name="searchoption"][value="교통최적+추천"]');
-    if (defaultSearch) defaultSearch.checked = true;
-    // carType 기본: 승용차
-    const defaultCar = document.querySelector('input[name="carType"][value="승용차"]');
-    if (defaultCar) defaultCar.checked = true;
-    // viaTime 기본: 60
+    // 먼저 메타데이터에서 저장된 옵션을 불러옴
+    let savedOptions = null;
+    try {
+        const metaResp = await withProjectId('/api/route-metadata', { method: 'GET' });
+        if (metaResp.ok) {
+            const metaData = await metaResp.json();
+            if (metaData.success && metaData.metadata && metaData.metadata.route_options) {
+                savedOptions = metaData.metadata.route_options;
+                console.log('📋 저장된 경로 옵션 로드:', savedOptions);
+            }
+        }
+    } catch (e) {
+        console.warn('메타데이터 로드 실패, 기본값 사용:', e);
+    }
+    
+    // 저장된 옵션이 있으면 해당 값 사용, 없으면 기본값
+    // searchOption 매핑: 코드 -> 라벨
+    const searchCodeToLabel = {
+        '0': '교통최적+추천',
+        '1': '교통최적+무료우선',
+        '2': '교통최적+최소시간',
+        '3': '교통최적+초보',
+        '17': '교통최적+화물차'
+    };
+    const carCodeToLabel = {
+        '1': '승용차',
+        '2': '중형승합차',
+        '3': '대형승합차',
+        '4': '대형화물차',
+        '5': '특수화물차'
+    };
+    
+    const searchValue = savedOptions?.searchOption ? searchCodeToLabel[savedOptions.searchOption] || '교통최적+추천' : '교통최적+추천';
+    const carValue = savedOptions?.carType ? carCodeToLabel[savedOptions.carType] || '승용차' : '승용차';
+    const viaValue = savedOptions?.viaTime ? savedOptions.viaTime : '60';
+    const startValue = savedOptions?.startTime ? formatYYYYMMDDHHMMToDatetimeLocal(savedOptions.startTime) : getCurrentDateTimeForDatetimeLocal();
+    
+    // searchoption 설정
+    const searchRadio = document.querySelector(`input[name="searchoption"][value="${searchValue}"]`);
+    if (searchRadio) searchRadio.checked = true;
+    
+    // carType 설정
+    const carRadio = document.querySelector(`input[name="carType"][value="${carValue}"]`);
+    if (carRadio) carRadio.checked = true;
+    
+    // viaTime 설정
     const viaInput = document.getElementById('via-time-input');
-    if (viaInput) viaInput.value = 60;
-    // startTime 기본: 현재시간 (datetime-local 형식)
+    if (viaInput) viaInput.value = viaValue;
+    
+    // startTime 설정
     const startInput = document.getElementById('start-time-input');
-    if (startInput) startInput.value = getCurrentDateTimeForDatetimeLocal();
+    if (startInput) startInput.value = startValue;
 
     popup.classList.remove('popup-hidden');
     popup.style.display = 'flex';
@@ -1412,6 +1451,18 @@ function formatDatetimeLocalToYYYYMMDDHHMM(value) {
     const [yyyy, mm, dd] = date.split('-');
     const [HH, MM] = time.split(':');
     return `${yyyy}${mm}${dd}${HH}${MM}`;
+}
+
+function formatYYYYMMDDHHMMToDatetimeLocal(value) {
+    // 입력 예시: 202509211430 (YYYYMMDDHHmm)
+    if (!value || value.length < 12) return getCurrentDateTimeForDatetimeLocal();
+    const yyyy = value.substring(0, 4);
+    const mm = value.substring(4, 6);
+    const dd = value.substring(6, 8);
+    const HH = value.substring(8, 10);
+    const MM = value.substring(10, 12);
+    // datetime-local 형식: YYYY-MM-DDTHH:MM
+    return `${yyyy}-${mm}-${dd}T${HH}:${MM}`;
 }
 
 // 매핑 함수: 한글 라벨 -> T-map 코드(문자열)

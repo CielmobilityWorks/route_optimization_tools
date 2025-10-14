@@ -16,7 +16,11 @@
     <style>
         html, body {
             height: 100%;
+            /* ensure padding is included in height so page doesn't overflow */
+            box-sizing: border-box;
         }
+        /* propagate box-sizing to all elements for predictable sizing */
+        *, *::before, *::after { box-sizing: inherit; }
         body {
             margin: 0;
             padding: 12px;
@@ -63,12 +67,101 @@
         .editor-btn-secondary:hover {
             background-color: #545b62;
         }
+        .editor-btn-success {
+            background-color: #28a745;
+        }
+        .editor-btn-success:hover {
+            background-color: #218838;
+        }
+        .editor-btn-danger {
+            background-color: #dc3545;
+        }
+        .editor-btn-danger:hover {
+            background-color: #c82333;
+        }
+        
+        /* Tab container */
+        .tab-container {
+            background: #ffffff;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            padding: 8px 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            overflow-x: auto;
+        }
+        
+        /* Tab buttons */
+        .tab-list {
+            display: flex;
+            gap: 4px;
+            flex: 1;
+            overflow-x: auto;
+        }
+        
+        .tab-btn {
+            padding: 6px 12px;
+            border: 1px solid #dee2e6;
+            background: #f8f9fa;
+            border-radius: 4px 4px 0 0;
+            cursor: pointer;
+            font-size: 12px;
+            color: #495057;
+            transition: all 0.2s;
+            white-space: nowrap;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        
+        .tab-btn:hover {
+            background: #e9ecef;
+        }
+        
+        .tab-btn.active {
+            background: #007bff;
+            color: #ffffff;
+            border-color: #007bff;
+            font-weight: 600;
+        }
+        
+        .tab-close {
+            margin-left: 4px;
+            font-weight: bold;
+            color: inherit;
+            opacity: 0.7;
+            cursor: pointer;
+        }
+        
+        .tab-close:hover {
+            opacity: 1;
+        }
+        
+        .tab-add-btn {
+            padding: 6px 12px;
+            border: 1px dashed #007bff;
+            background: transparent;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            color: #007bff;
+            transition: all 0.2s;
+            white-space: nowrap;
+        }
+        
+        .tab-add-btn:hover {
+            background: #e7f3ff;
+        }
+        
         .editor-map-wrapper {
             flex: 1;
             min-height: 0;
             display: flex;
             flex-direction: column;
             position: relative;
+            /* ensure map area can't grow beyond viewport (header ~60px + tabs ~50px + body padding) */
+            max-height: calc(100vh - 134px);
         }
         #route-map {
             flex: 1;
@@ -87,6 +180,14 @@
             <button type="button" class="editor-btn" id="route-editor-reload">Reload</button>
             <button type="button" class="editor-btn editor-btn-secondary" onclick="window.close()">Close</button>
         </div>
+    </div>
+
+    <!-- Tab container -->
+    <div class="tab-container">
+        <div class="tab-list" id="tab-list">
+            <!-- Tabs will be dynamically added here -->
+        </div>
+        <button type="button" class="tab-add-btn" id="add-tab-btn">+ Add Scenario</button>
     </div>
 
     <div class="editor-map-wrapper">
@@ -112,21 +213,22 @@
             #route-bottom-panel {
                 position: fixed;
                 left: 50%;
-                bottom: 25px;
+                bottom: 50px;
                 transform: translateX(-50%);
                 width: calc(100% - 24px);
                 max-width: 1200px; /* limit overall width */
-                height: 160px;
+                height: 250px;
                 background: rgba(255,255,255,0.98);
                 border-radius: 8px;
                 box-shadow: 0 6px 18px rgba(0,0,0,0.12);
                 z-index: 11000;
                 display: flex;
                 flex-direction: column;
-                gap: 6px;
-                padding: 10px 5px;
+                gap: 3px; /* tighter vertical spacing */
+                    /* make padding symmetric: top/right/bottom/left */
+                    padding: 8px; /* visually balanced padding on all sides */
                 overflow: hidden;
-                font-size: 12px; /* slightly reduced to fit */
+                font-size: 11px; /* reduced font size */
             }
 
             /* Use grid for header and rows so columns align precisely */
@@ -137,8 +239,8 @@
                              Reduce vehicle width and redistribute to Dist/Time/Load for better balance: 22, 90, 56, 70, 38. */
                          grid-template-columns: 22px 90px 56px 70px 38px 1fr;
                 align-items: center;
-                gap: 6px;
-                min-height: 36px;
+                gap: 4px; /* reduce cell gap a bit */
+                min-height: 26px; /* balanced row height */
             }
 
             /* Header (table-like) */
@@ -146,12 +248,12 @@
                 display: grid;
                 grid-template-columns: 22px 90px 56px 70px 38px 1fr;
                 align-items: center;
-                gap: 6px;
-                padding: 6px 5px;
+                gap: 4px;
+                padding: 5px 0px;
                 border-bottom: 1px solid rgba(0,0,0,0.06);
                 color: #495057;
                 font-weight: 600;
-                font-size: 12px;
+                font-size: 11px;
                 box-sizing: border-box;
             }
 
@@ -185,18 +287,18 @@
             #route-bottom-panel .rbp-right {
                 flex: 1 1 auto;
                 min-width: 0; /* allow shrinking so left column never overflows */
-                height: 36px;
+                height: 26px; /* balanced height */
                 display: flex;
                 align-items: center;
                 overflow-x: auto;
-                padding-right: 5px;
-                padding-left: 5px;
+                padding-right: 6px;
+                padding-left: 6px;
             }
 
             /* rows container scroll area */
             #route-bottom-panel .rbp-rows {
                 overflow-y: auto;
-                max-height: calc(100% - 42px); /* leave space for header */
+                max-height: calc(100% - 38px); /* leave space for header */
             }
 
             /* center check column in header and rows */
@@ -214,21 +316,119 @@
             #route-bottom-panel .rbp-timeline {
                 position: relative;
                 width: 100%;
-                height: 12px;
+                height: 28px; /* balanced height */
                 background: linear-gradient(90deg, rgba(0,0,0,0.03), rgba(0,0,0,0.01));
                 border-radius: 4px;
+                padding: 0;
             }
 
-            /* Colored bar placeholder representing the route/time block */
+            /* Timeline vertical grid ticks (15-minute intervals) */
+            #route-bottom-panel .rbp-timeline .rbp-grid-tick {
+                position: absolute;
+                top: 0;
+                bottom: 0;
+                width: 1px;
+                background: rgba(0,0,0,0.06); /* 옅은 회색 */
+                pointer-events: none;
+                z-index: 2; /* below markers (which use z-index 10) */
+            }
+
+            /* Hour ticks (every 4 x 15min) - darker and slightly thicker */
+            #route-bottom-panel .rbp-timeline .rbp-grid-tick-hour {
+                width: 1.5px;
+                background: rgba(0,0,0,0.10); /* 더 진한 회색 */
+            }
+
+            /* Colored bar representing the route/time block */
             #route-bottom-panel .rbp-bar {
                 position: absolute;
                 left: 0;
+                top: 50%;
+                transform: translateY(-50%);
+                height: 7px;
+                width: 100%; /* full width for timeline */
+                border-radius: 6px;
+                box-shadow: 0 1px 3px rgba(0,0,0,0.06) inset;
+                opacity: 0.95;
+            }
+
+
+            /* Time scale ticks */
+            #route-bottom-panel .rbp-time-tick {
+                position: absolute;
                 top: 0;
                 height: 100%;
-                width: 100%; /* full width for placeholder */
-                border-radius: 8px;
-                box-shadow: 0 2px 6px rgba(0,0,0,0.06) inset;
-                opacity: 0.95;
+                border-left: 1px solid rgba(0,0,0,0.15);
+                pointer-events: none;
+            }
+
+            #route-bottom-panel .rbp-time-label {
+                position: absolute;
+                bottom: 2px;
+                font-size: 9px;
+                color: #666;
+                transform: translateX(-50%);
+                white-space: nowrap;
+                pointer-events: none;
+            }
+
+            /* Stop markers on timeline */
+            #route-bottom-panel .rbp-stop-marker {
+                position: absolute;
+                top: 50%;
+                transform: translate(-50%, -50%);
+                width: 14px; /* slightly larger */
+                height: 14px; /* slightly larger */
+                border-radius: 50%;
+                background: white;
+                border: 2px solid;
+                cursor: pointer;
+                transition: all 0.2s;
+                z-index: 10;
+                box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-size: 10px;
+                font-weight: 700;
+                line-height: 1;
+                color: #6c757d; /* 회색 레이블 */
+                user-select: none;
+            }
+
+            #route-bottom-panel .rbp-stop-marker:hover {
+                transform: translate(-50%, -50%) scale(1.4);
+                z-index: 20;
+                box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+            }
+
+            #route-bottom-panel .rbp-stop-marker.depot-marker {
+                border-radius: 3px;
+                width: 14px;
+                height: 14px;
+            }
+
+            /* Tooltip styling for markers (shown on click via .show-tooltip) */
+            #route-bottom-panel .rbp-stop-marker.show-tooltip[title]::after {
+                content: attr(title);
+                position: absolute;
+                bottom: 100%;
+                left: 50%;
+                transform: translateX(-50%);
+                background: rgba(0,0,0,0.85);
+                color: white;
+                padding: 6px 10px;
+                border-radius: 4px;
+                font-size: 8px; /* 작게 표시 */
+                display: block;
+                white-space: pre; /* respect explicit newlines, prevent soft-wrapping */
+                line-height: 1.5; /* 줄간격 넓혀 가독성 향상 */
+                max-width: 90vw; /* prevent overflowing the viewport */
+                overflow: visible;
+                margin-bottom: 6px;
+                pointer-events: none;
+                z-index: 1000;
+                box-sizing: border-box;
             }
 
             /* Header: left-align all header columns (except the check column stays centered) */
@@ -236,6 +436,35 @@
                 text-align: left;
                 padding-left: 5px;
                 justify-content: flex-start;
+            }
+
+            /* Timeline header scale container */
+            #route-bottom-panel .rbp-timeline-scale {
+                position: relative;
+                width: 100%;
+                height: 32px;
+                background: linear-gradient(90deg, rgba(0,0,0,0.03), rgba(0,0,0,0.01));
+                border-radius: 4px;
+            }
+
+            /* Time scale ticks in header */
+            #route-bottom-panel .rbp-timeline-scale .rbp-time-tick {
+                position: absolute;
+                top: 0;
+                height: 100%;
+                border-left: 1px solid rgba(0,0,0,0.15);
+                pointer-events: none;
+            }
+
+            #route-bottom-panel .rbp-timeline-scale .rbp-time-label {
+                position: absolute;
+                top: 50%;
+                transform: translate(-50%, -50%);
+                font-size: 10px;
+                color: #666;
+                white-space: nowrap;
+                pointer-events: none;
+                font-weight: 500;
             }
 
             /* Data cells: right-align Dist/Time/Load in rows only */
@@ -273,7 +502,7 @@
 
             /* Make rows slightly separated */
             #route-bottom-panel .rbp-row + .rbp-row {
-                margin-top: 4px;
+                margin-top: 1.5px; /* slight gap between rows */
             }
         </style>
     </div>
