@@ -3,7 +3,7 @@
   "vehicleCapacity": 20,
   "timeLimitSec": 60,
   "primaryObjective": "time",
-  "tiebreaker1": "time",
+  "tiebreaker1": "makespan",
   "tiebreaker2": "vehicles",
   "additionalObjectives": [
     "workloadBalance"

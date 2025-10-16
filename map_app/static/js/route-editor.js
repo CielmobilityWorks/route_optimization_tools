@@ -319,6 +319,54 @@
         }
     }
 
+    async function generateAndViewReport() {
+        if (!currentEditId) {
+            alert('먼저 편집 시나리오를 선택하거나 생성하세요.');
+            return;
+        }
+        
+        const viewReportBtn = document.getElementById('route-editor-view-report');
+        if (viewReportBtn) {
+            viewReportBtn.disabled = true;
+            viewReportBtn.textContent = '리포트 생성 중...';
+        }
+        
+        try {
+            const url = buildUrlWithEditId('/generate-edit-report', currentEditId);
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            });
+            
+            if (!response.ok) {
+                const data = await response.json();
+                throw new Error(data.message || '리포트 생성 실패');
+            }
+            
+            const data = await response.json();
+            if (data.success && data.reportUrl) {
+                // 새 창(팝업)으로 리포트 열기 - visualization과 동일한 팝업 옵션 사용
+                // 일부 브라우저는 팝업을 차단할 수 있으므로 실패 시 새 탭으로 열도록 폴백 추가
+                const popupOptions = 'width=1500,height=800';
+                const newWin = window.open(data.reportUrl, '_blank', popupOptions);
+                if (!newWin) {
+                    // 팝업이 차단된 경우 같은 탭에서 열기(또는 사용자가 새 탭을 선호하면 location.href 교체)
+                    window.open(data.reportUrl, '_blank');
+                }
+            } else {
+                throw new Error(data.message || '리포트 URL을 가져올 수 없습니다.');
+            }
+        } catch (error) {
+            console.error('Failed to generate report:', error);
+            alert(error.message || '리포트 생성 중 오류가 발생했습니다.');
+        } finally {
+            if (viewReportBtn) {
+                viewReportBtn.disabled = false;
+                viewReportBtn.textContent = 'View Report';
+            }
+        }
+    }
+
     async function loadGeneratedRoutes() {
         if (!currentEditId) {
             console.log('No edit scenario selected yet.');
@@ -373,6 +421,14 @@
             });
         }
         
+        // Setup view report button
+        const viewReportBtn = document.getElementById('route-editor-view-report');
+        if (viewReportBtn) {
+            viewReportBtn.addEventListener('click', async () => {
+                await generateAndViewReport();
+            });
+        }
+        
         // Setup add tab button
         const addTabBtn = document.getElementById('add-tab-btn');
         if (addTabBtn) {
@@ -397,7 +453,9 @@
 /* Bottom panel rendering: creates rows for each vehicle with left meta and right timeline with time scale and stop markers */
 function renderBottomRoutePanel(vehicleRoutes) {
     const panel = document.getElementById('route-bottom-panel');
-    if (!panel) return;
+    if (!panel) {
+        return;
+    }
     // Rows container inside panel
     let rowsContainer = panel.querySelector('.rbp-rows');
     if (!rowsContainer) {
@@ -465,12 +523,18 @@ function renderBottomRoutePanel(vehicleRoutes) {
         vcell.appendChild(vname);
         row.appendChild(vcell);
 
+        // Get end_point for accurate cumulative values
+        const endPoint = vr.end_point || (vr.waypoints && vr.waypoints.length > 0 ? vr.waypoints[vr.waypoints.length - 1] : null);
+
         // 3) Dist
         const dcell = document.createElement('div');
         dcell.className = 'rbp-cell rbp-cell-dist';
-        // total_distance is in meters; format as 00.0km
+        // Use end_point's cumulative_distance for accuracy (more precise than total_distance)
         let distText = '-';
-        if (vr.total_distance != null && !isNaN(Number(vr.total_distance))) {
+        if (endPoint && endPoint.cumulative_distance != null && !isNaN(Number(endPoint.cumulative_distance))) {
+            const km = Number(endPoint.cumulative_distance) / 1000.0;
+            distText = `${km.toFixed(2)}km`;
+        } else if (vr.total_distance != null && !isNaN(Number(vr.total_distance))) {
             const km = Number(vr.total_distance) / 1000.0;
             distText = `${km.toFixed(1)}km`;
         } else if (vr.total_distance && typeof vr.total_distance === 'string' && vr.total_distance.includes('km')) {
@@ -484,10 +548,16 @@ function renderBottomRoutePanel(vehicleRoutes) {
         // 4) Time
         const tcell = document.createElement('div');
         tcell.className = 'rbp-cell rbp-cell-time';
-        // total_time may be in seconds; convert to MM분 SS초
+        // Use end_point's cumulative_time for accuracy (more precise than total_time)
         let timeText = '-';
-        const totalTime = vr.total_time || 0;
-        if (vr.total_time != null && !isNaN(Number(vr.total_time))) {
+        const endPointTime = endPoint ? endPoint.cumulative_time : null;
+        if (endPointTime != null && !isNaN(Number(endPointTime))) {
+            const secs = Number(endPointTime);
+            const totalSeconds = secs;
+            const minutes = Math.floor(totalSeconds / 60);
+            const seconds = Math.floor(totalSeconds % 60);
+            timeText = `${String(minutes).padStart(2,'0')}분 ${String(seconds).padStart(2,'0')}초`;
+        } else if (vr.total_time != null && !isNaN(Number(vr.total_time))) {
             const secs = Number(vr.total_time);
             const totalSeconds = secs;
             const minutes = Math.floor(totalSeconds / 60);
@@ -521,6 +591,9 @@ function renderBottomRoutePanel(vehicleRoutes) {
         timelineCell.className = 'rbp-cell rbp-cell-timeline';
         const timelineOuter = document.createElement('div');
         timelineOuter.className = 'rbp-timeline';
+        
+        // Calculate total time for this vehicle (use end_point cumulative time if available, otherwise total_time)
+        const totalTime = (endPoint && endPoint.cumulative_time) ? endPoint.cumulative_time : (vr.total_time || 0);
         
         // Add background bar
         const bar = document.createElement('div');
@@ -723,7 +796,8 @@ function addStopMarkers(timelineContainer, waypoints, maxTime, vehicleColor) {
                 markers.forEach((marker, markerIndex) => {
                     // 마커 요소에서 정류장 정보 추출
                     const markerElement = marker.getElement();
-                    const markerType = markerElement?.querySelector('[data-marker-type]')?.getAttribute('data-marker-type');
+                    const markerTypeElement = markerElement ? markerElement.querySelector('[data-marker-type]') : null;
+                    const markerType = markerTypeElement ? markerTypeElement.getAttribute('data-marker-type') : null;
                     
                     // depot 마커는 드래그 불가 (시작/종료점)
                     if (markerType === 'start' || markerType === 'end') {

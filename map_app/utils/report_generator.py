@@ -108,8 +108,18 @@ def generate_route_table_report_html(project_id: str | None = None, route_data: 
     parts.append('<style>')
     parts.append("body{font-family:Segoe UI,Helvetica,Arial;margin:12px;color:#222;font-size:13px}")
     parts.append("h1{font-size:18px;margin-bottom:6px}")
-    parts.append(".report-container{display:flex;flex-direction:column;align-items:flex-start}")
-    parts.append(".report-box{width:800px;background:#fff;padding:12px;border-radius:6px;box-shadow:0 1px 3px rgba(0,0,0,0.08);margin-bottom:14px}")
+    # add button styles compatible with app 'editor-btn editor-btn-success'
+    parts.append(".editor-btn{padding:6px 12px;border:none;border-radius:4px;font-size:12px;cursor:pointer;background-color:#007bff;color:#ffffff;transition:background-color .3s}")
+    parts.append(".editor-btn:hover{background-color:#0056b3}")
+    parts.append(".editor-btn-success{background-color:#28a745}")
+    parts.append(".editor-btn-success:hover{background-color:#218838}")
+    # header actions container to position download button at top-right
+    parts.append(".report-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}")
+    parts.append(".report-header .actions{display:flex;gap:8px}")
+    parts.append(".report-container{display:flex;flex-direction:column;align-items:center}")
+    # wrapper to unify widths of summary, charts and tables
+    parts.append(".report-wrapper{width:800px;max-width:100%;box-sizing:border-box}")
+    parts.append(".report-box{width:100%;background:#fff;padding:12px;border-radius:6px;box-shadow:0 1px 3px rgba(0,0,0,0.08);margin-bottom:14px;box-sizing:border-box}")
     parts.append("table{width:100%;border-collapse:collapse;margin-top:8px}")
     parts.append("th,td{border:1px solid #e6e6e6;padding:6px 8px;font-size:12px}")
     parts.append("th{background:#f7fafc;font-weight:600}")
@@ -122,7 +132,7 @@ def generate_route_table_report_html(project_id: str | None = None, route_data: 
     parts.append(".vehicle-body{margin-top:8px;overflow:hidden;max-height:2000px;transition:max-height 260ms ease;padding-top:6px}")
     parts.append(".vehicle-body.collapsed{max-height:0;padding-top:0}")
     parts.append("th.num, td.num{text-align:right}")
-    parts.append(".global-summary-grid{width:800px;display:flex;gap:10px;margin:10px 0;padding:0}")
+    parts.append(".global-summary-grid{width:100%;display:flex;gap:10px;margin:10px 0;padding:0;flex-wrap:wrap}")
     parts.append(".summary-card{flex:1;background:#fff;padding:12px;border-radius:8px;box-shadow:0 2px 6px rgba(0,0,0,0.06);text-align:center;color:#222}")
     parts.append(".summary-card .label{font-size:12px;color:#666;margin-bottom:8px}")
     parts.append(".summary-card .value{font-size:18px;font-weight:800;color:#222}")
@@ -130,10 +140,10 @@ def generate_route_table_report_html(project_id: str | None = None, route_data: 
     # JS: toggle by toggling a CSS class for smooth animation
     parts.append('<script>function toggleVehicleBody(id){var el=document.getElementById(id);var btn=document.getElementById(id+"-btn");if(!el) return; if(el.classList.contains("collapsed")){el.classList.remove("collapsed"); if(btn) btn.textContent="▼";} else {el.classList.add("collapsed"); if(btn) btn.textContent="▲";}} </script>')
     parts.append('</head><body>')
-    parts.append(f'<h1>Route Table Report</h1>')
-    # download button (allows saving the current HTML as a file)
-    parts.append('<div style="margin:8px 0 12px 0;">')
-    parts.append('<button id="download-report-btn" style="padding:6px 10px;border-radius:4px;border:1px solid #ddd;background:#f5f5f5;cursor:pointer">Download HTML</button>')
+    # Header with title on left and download button at top-right
+    parts.append('<div class="report-header">')
+    parts.append(f'<div><h1 style="margin:0">Route Table Report</h1><div class="meta"><small class="meta">Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</small></div></div>')
+    parts.append('<div class="actions"><button id="download-report-btn" class="editor-btn editor-btn-success">Download HTML</button></div>')
     parts.append('</div>')
     # JS for download (split into multiple parts to avoid quoting/paren issues)
     parts.append('<script>')
@@ -152,7 +162,7 @@ def generate_route_table_report_html(project_id: str | None = None, route_data: 
     parts.append('  var btn=document.getElementById("download-report-btn"); if(btn) btn.addEventListener("click", downloadReport);')
     parts.append('});')
     parts.append('</script>')
-    parts.append(f"<div class=\"meta\"><small class=\"meta\">Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</small></div>")
+    # (note: generated meta included in header)
 
     # Compute overall summary: total vehicles, total distance (m), total time (s), total demand
     total_vehicles = len(vehicle_routes)
@@ -160,15 +170,23 @@ def generate_route_table_report_html(project_id: str | None = None, route_data: 
     total_time_s = 0.0
     total_demand_sum = 0.0
     for route in vehicle_routes.values():
-        # distance
+        # distance: prefer end_point's cumulative_distance (most accurate)
         td = None
-        for k in ('total_distance', 'totalDistance', 'total_distance_m', 'distance_m'):
-            if k in route and route.get(k) is not None:
-                try:
-                    td = float(route.get(k))
-                    break
-                except Exception:
-                    pass
+        end_point = route.get('end_point')
+        if end_point and isinstance(end_point, dict) and 'cumulative_distance' in end_point:
+            try:
+                td = float(end_point.get('cumulative_distance'))
+            except Exception:
+                pass
+        # fallback to total_distance if end_point not available
+        if td is None:
+            for k in ('total_distance', 'totalDistance', 'total_distance_m', 'distance_m'):
+                if k in route and route.get(k) is not None:
+                    try:
+                        td = float(route.get(k))
+                        break
+                    except Exception:
+                        pass
         if td is None and isinstance(route.get('properties'), dict):
             for k in ('totalDistance', 'total_time', 'total_distance_m'):
                 try:
@@ -184,15 +202,22 @@ def generate_route_table_report_html(project_id: str | None = None, route_data: 
         except Exception:
             pass
 
-        # time
+        # time: prefer end_point's cumulative_time (most accurate)
         tt = None
-        for k in ('total_time', 'totalTime', 'total_time_s'):
-            if k in route and route.get(k) is not None:
-                try:
-                    tt = float(route.get(k))
-                    break
-                except Exception:
-                    pass
+        if end_point and isinstance(end_point, dict) and 'cumulative_time' in end_point:
+            try:
+                tt = float(end_point.get('cumulative_time'))
+            except Exception:
+                pass
+        # fallback to total_time if end_point not available
+        if tt is None:
+            for k in ('total_time', 'totalTime', 'total_time_s'):
+                if k in route and route.get(k) is not None:
+                    try:
+                        tt = float(route.get(k))
+                        break
+                    except Exception:
+                        pass
         if tt is None and isinstance(route.get('properties'), dict):
             for k in ('totalTime', 'total_time_s'):
                 try:
@@ -244,8 +269,9 @@ def generate_route_table_report_html(project_id: str | None = None, route_data: 
     except Exception:
         total_demand_display = 'N/A'
 
+    parts.append('<div class="report-wrapper">')
     parts.append('<div class="global-summary-grid">')
-    parts.append(f'<div class="summary-card"><div class="label">Total Demand(EA)</div><div class="value">{total_vehicles}</div></div>')
+    parts.append(f'<div class="summary-card"><div class="label">Total Vehicle(EA)</div><div class="value">{total_vehicles}</div></div>')
     parts.append(f'<div class="summary-card"><div class="label">Total Distance(km)</div><div class="value">{total_distance_km}</div></div>')
     parts.append(f'<div class="summary-card"><div class="label">Total Time</div><div class="value">{total_time_fmt}</div></div>')
     parts.append(f'<div class="summary-card"><div class="label">Total Demand(EA)</div><div class="value">{total_demand_display}</div></div>')
@@ -265,15 +291,24 @@ def generate_route_table_report_html(project_id: str | None = None, route_data: 
         r = vehicle_routes.get(vid) or {}
         lbl = r.get('vehicle_id', vid)
 
-        # Try to find a total distance value from known keys
+        # Prefer end_point's cumulative_distance (most accurate)
         total_m = None
-        for key in ('total_distance', 'totalDistance', 'total_distance_m', 'distance_m'):
-            if key in r and r.get(key) is not None:
-                try:
-                    total_m = float(r.get(key))
-                    break
-                except Exception:
-                    pass
+        end_point = r.get('end_point')
+        if end_point and isinstance(end_point, dict) and 'cumulative_distance' in end_point:
+            try:
+                total_m = float(end_point.get('cumulative_distance'))
+            except Exception:
+                pass
+        
+        # Fallback: Try to find a total distance value from known keys
+        if total_m is None:
+            for key in ('total_distance', 'totalDistance', 'total_distance_m', 'distance_m'):
+                if key in r and r.get(key) is not None:
+                    try:
+                        total_m = float(r.get(key))
+                        break
+                    except Exception:
+                        pass
         if total_m is None and isinstance(r.get('properties'), dict):
             for k in ('totalDistance', 'total_distance_m', 'distance_m'):
                 try:
@@ -360,13 +395,22 @@ def generate_route_table_report_html(project_id: str | None = None, route_data: 
     for vid in vehicle_order:
         r = vehicle_routes.get(vid) or {}
         tt = None
-        for k in ('total_time', 'totalTime', 'total_time_s'):
-            if k in r and r.get(k) is not None:
-                try:
-                    tt = float(r.get(k))
-                    break
-                except Exception:
-                    pass
+        # Prefer end_point's cumulative_time (most accurate)
+        end_point = r.get('end_point')
+        if end_point and isinstance(end_point, dict) and 'cumulative_time' in end_point:
+            try:
+                tt = float(end_point.get('cumulative_time'))
+            except Exception:
+                pass
+        # Fallback to total_time if end_point not available
+        if tt is None:
+            for k in ('total_time', 'totalTime', 'total_time_s'):
+                if k in r and r.get(k) is not None:
+                    try:
+                        tt = float(r.get(k))
+                        break
+                    except Exception:
+                        pass
         if tt is None and isinstance(r.get('properties'), dict):
             for k in ('totalTime', 'total_time_s'):
                 try:
@@ -376,15 +420,12 @@ def generate_route_table_report_html(project_id: str | None = None, route_data: 
                         break
                 except Exception:
                     continue
-        # convert seconds to minutes if it looks like seconds (> 1000 treat as meters?)
+        # convert seconds to minutes (T-map returns seconds)
         if tt is None:
             time_values.append(None)
         else:
-            # if tt appears to be in seconds, convert to minutes; if already minutes, keep
-            if tt > 1800:  # heuristics: >30min probably seconds
-                time_values.append(round(tt/60.0, 2))
-            else:
-                time_values.append(round(tt/60.0, 2))
+            # T-map returns time in seconds, so convert to minutes
+            time_values.append(round(tt/60.0, 2))
     parts.append(f'const _chartTimeData = {json.dumps(time_values)};')
 
     parts.append('document.addEventListener("DOMContentLoaded", function(){')
@@ -461,15 +502,31 @@ def generate_route_table_report_html(project_id: str | None = None, route_data: 
 
         waypoints = route.get('waypoints') or route.get('stops') or route.get('via_points') or []
 
+        # Use end_point's cumulative values for accuracy (prefer over total_distance/total_time)
         total_distance = None
         total_time = None
-        for key in ('total_distance', 'totalDistance', 'total_distance_m'):
-            if key in route and route.get(key) is not None:
+        end_point = route.get('end_point')
+        if end_point and isinstance(end_point, dict):
+            if 'cumulative_distance' in end_point:
                 try:
-                    total_distance = float(route.get(key))
-                    break
+                    total_distance = float(end_point.get('cumulative_distance'))
                 except Exception:
                     pass
+            if 'cumulative_time' in end_point:
+                try:
+                    total_time = float(end_point.get('cumulative_time'))
+                except Exception:
+                    pass
+        
+        # Fallback to total_distance/total_time if end_point not available
+        if total_distance is None:
+            for key in ('total_distance', 'totalDistance', 'total_distance_m'):
+                if key in route and route.get(key) is not None:
+                    try:
+                        total_distance = float(route.get(key))
+                        break
+                    except Exception:
+                        pass
         if total_distance is None and isinstance(route.get('properties'), dict):
             for k in ('totalDistance', 'total_distance_m', 'distance_m'):
                 if k in route['properties'] and route['properties'].get(k) is not None:
@@ -479,13 +536,14 @@ def generate_route_table_report_html(project_id: str | None = None, route_data: 
                     except Exception:
                         pass
 
-        for key in ('total_time', 'totalTime', 'total_time_s'):
-            if key in route and route.get(key) is not None:
-                try:
-                    total_time = float(route.get(key))
-                    break
-                except Exception:
-                    pass
+        if total_time is None:
+            for key in ('total_time', 'totalTime', 'total_time_s'):
+                if key in route and route.get(key) is not None:
+                    try:
+                        total_time = float(route.get(key))
+                        break
+                    except Exception:
+                        pass
         if total_time is None and isinstance(route.get('properties'), dict):
             for k in ('totalTime', 'total_time_s'):
                 if k in route['properties'] and route['properties'].get(k) is not None:
@@ -495,36 +553,38 @@ def generate_route_table_report_html(project_id: str | None = None, route_data: 
                     except Exception:
                         pass
 
-        coords = []
-        for wp in waypoints:
-            lat, lon = _extract_coord(wp)
-            coords.append((lat, lon))
-
-        segment_dists = []
-        for j in range(1, len(coords)):
-            lat1, lon1 = coords[j-1]
-            lat2, lon2 = coords[j]
-            if None in (lat1, lon1, lat2, lon2):
-                segment_dists.append(None)
-            else:
-                d = _haversine_meters(lat1, lon1, lat2, lon2)
-                segment_dists.append(d)
-
-        if total_distance is None:
-            try:
-                total_distance = sum(d for d in segment_dists if d is not None)
-            except Exception:
-                total_distance = None
-
-        segment_times = []
-        if total_time is not None and total_distance and total_distance > 0:
-            for d in segment_dists:
-                if d is None:
-                    segment_times.append(None)
-                else:
-                    segment_times.append(total_time * (d / total_distance))
-        else:
-            segment_times = [None] * len(segment_dists)
+        # Note: We now use T-map API's cumulative_time and cumulative_distance from waypoints directly
+        # The following segment distance/time calculation is kept for reference but not used
+        # coords = []
+        # for wp in waypoints:
+        #     lat, lon = _extract_coord(wp)
+        #     coords.append((lat, lon))
+        #
+        # segment_dists = []
+        # for j in range(1, len(coords)):
+        #     lat1, lon1 = coords[j-1]
+        #     lat2, lon2 = coords[j]
+        #     if None in (lat1, lon1, lat2, lon2):
+        #         segment_dists.append(None)
+        #     else:
+        #         d = _haversine_meters(lat1, lon1, lat2, lon2)
+        #         segment_dists.append(d)
+        #
+        # if total_distance is None:
+        #     try:
+        #         total_distance = sum(d for d in segment_dists if d is not None)
+        #     except Exception:
+        #         total_distance = None
+        #
+        # segment_times = []
+        # if total_time is not None and total_distance and total_distance > 0:
+        #     for d in segment_dists:
+        #         if d is None:
+        #             segment_times.append(None)
+        #         else:
+        #             segment_times.append(total_time * (d / total_distance))
+        # else:
+        #     segment_times = [None] * len(segment_dists)
 
         # Aggregate total demand for this vehicle (sum numeric demands only)
         total_demand = None
@@ -563,46 +623,49 @@ def generate_route_table_report_html(project_id: str | None = None, route_data: 
         parts.append('<thead><tr><th class="num">No</th><th>ID</th><th>Name</th><th class="num">Time (min)</th><th class="num">Time (cum, min)</th><th class="num">Distance (km)</th><th class="num">Distance (cum, km)</th><th class="num">Demand</th></tr></thead>')
         parts.append('<tbody>')
 
-        cum_time = 0.0
-        cum_dist = 0.0
+        prev_cum_time = 0.0
+        prev_cum_dist = 0.0
+        
+        def fmt_time(t):
+            if t is None:
+                return 'N/A'
+            return f"{(t/60):.1f}"
+
+        def fmt_dist(d):
+            if d is None:
+                return 'N/A'
+            try:
+                return f"{(d/1000):,.2f}"
+            except Exception:
+                return 'N/A'
+
         for idx, wp in enumerate(waypoints, start=1):
             wid = wp.get('id') if isinstance(wp, dict) else ''
             name = wp.get('name') if isinstance(wp, dict) else str(wp)
             demand = wp.get('demand') if isinstance(wp, dict) and 'demand' in wp else ''
 
-            seg_index = idx - 2
-            seg_dist = None
+            # Use T-map API's cumulative values directly from waypoint
+            cum_time = wp.get('cumulative_time') if isinstance(wp, dict) else None
+            cum_dist = wp.get('cumulative_distance') if isinstance(wp, dict) else None
+            
+            # Calculate segment time and distance (difference from previous waypoint)
             seg_time = None
-            if seg_index >= 0 and seg_index < len(segment_dists):
-                seg_dist = segment_dists[seg_index]
-                seg_time = segment_times[seg_index] if segment_times else None
-
-            if seg_dist is not None:
-                cum_dist += seg_dist
-            if seg_time is not None:
-                cum_time += seg_time
-
-            def fmt_time(t):
-                if t is None:
-                    return 'N/A'
-                return f"{(t/60):.1f}"
-
-            def fmt_dist(d):
-                if d is None:
-                    return 'N/A'
-                try:
-                    return f"{(d/1000):,.2f}"
-                except Exception:
-                    return 'N/A'
+            seg_dist = None
+            if cum_time is not None:
+                seg_time = cum_time - prev_cum_time
+                prev_cum_time = cum_time
+            if cum_dist is not None:
+                seg_dist = cum_dist - prev_cum_dist
+                prev_cum_dist = cum_dist
 
             parts.append('<tr>')
             parts.append(f'<td class="num">{idx}</td>')
             parts.append(f'<td>{wid}</td>')
             parts.append(f'<td>{name}</td>')
             parts.append(f'<td class="num">{fmt_time(seg_time)}</td>')
-            parts.append(f'<td class="num">{fmt_time(cum_time) if seg_time is not None else ("N/A")}</td>')
+            parts.append(f'<td class="num">{fmt_time(cum_time)}</td>')
             parts.append(f'<td class="num">{fmt_dist(seg_dist)}</td>')
-            parts.append(f'<td class="num">{fmt_dist(cum_dist) if seg_dist is not None else ("N/A")}</td>')
+            parts.append(f'<td class="num">{fmt_dist(cum_dist)}</td>')
             parts.append(f'<td class="num">{demand}</td>')
             parts.append('</tr>')
 
@@ -629,6 +692,8 @@ def generate_route_table_report_html(project_id: str | None = None, route_data: 
         parts.append('</div>')
         parts.append('</div>')
 
+    parts.append('</div>')
+    # close report-wrapper
     parts.append('</div>')
     parts.append('</body></html>')
     return '\n'.join(parts)

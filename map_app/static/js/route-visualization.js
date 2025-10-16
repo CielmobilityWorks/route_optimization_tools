@@ -208,9 +208,10 @@ function updateRouteInfoTable(vehicleRoutes) {
         
         console.log(`🚗 차량 정보 처리 중: Vehicle ${vehicleId}`);
         
-        // 거리와 시간 계산
-        const totalDistance = vehicleRoute.total_distance || 0;
-        const totalTime = vehicleRoute.total_time || 0;
+        // 거리와 시간 계산: end_point의 cumulative 값 사용 (더 정확함)
+        const endPoint = vehicleRoute.end_point || vehicleRoute.waypoints?.[vehicleRoute.waypoints.length - 1];
+        const totalDistance = endPoint?.cumulative_distance ?? vehicleRoute.total_distance ?? 0;
+        const totalTime = endPoint?.cumulative_time ?? vehicleRoute.total_time ?? 0;
         
         // Load 계산: 백엔드에서 제공하는 차량별 최종 누적값(route_load)이 있으면 사용
         // 없다면 폴백으로 waypoints의 demand 합계를 사용
@@ -227,13 +228,13 @@ function updateRouteInfoTable(vehicleRoutes) {
         
         // 거리 포맷팅 (미터 -> km)
         const distanceText = totalDistance >= 1000 
-            ? `${(totalDistance / 1000).toFixed(1)}km`
-            : `${totalDistance}m`;
+            ? `${(totalDistance / 1000).toFixed(2)}km`
+            : `${Math.round(totalDistance)}m`;
         
         // 시간 포맷팅 (초 -> 분)
         const timeText = totalTime >= 60 
-            ? `${Math.floor(totalTime / 60)}분 ${totalTime % 60}초`
-            : `${totalTime}초`;
+            ? `${Math.floor(totalTime / 60)}분 ${Math.floor(totalTime % 60)}초`
+            : `${Math.floor(totalTime)}초`;
         
         // 테이블 행 생성
         const row = document.createElement('tr');

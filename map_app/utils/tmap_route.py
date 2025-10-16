@@ -255,13 +255,46 @@ class TmapRoute:
                 # Annotate waypoints (in-place) with cumulative_time/cumulative_distance
                 all_points = [start_point] + list(via_points or []) + [end_point]
                 if unique_coords and cumulative_time_per_coord:
+                    last_index = 0  # Track last matched index to ensure sequential matching
                     for i, wp in enumerate(all_points):
                         try:
                             tx = wp.get('x')
                             ty = wp.get('y')
                             if tx is None or ty is None:
                                 continue
-                            nearest = _closest_index(unique_coords, [tx, ty])
+                            
+                            # Determine search range based on waypoint position
+                            if i == 0:
+                                # Start point: search in first 20% of route
+                                search_start = 0
+                                search_end = max(1, int(len(unique_coords) * 0.2))
+                            elif i == len(all_points) - 1:
+                                # End point: search in last 20% of route
+                                search_start = max(last_index, int(len(unique_coords) * 0.8))
+                                search_end = len(unique_coords)
+                            else:
+                                # Via points: search from last index to end
+                                search_start = last_index
+                                search_end = len(unique_coords)
+                            
+                            # Find nearest coordinate in the search range
+                            best_i = search_start
+                            best_d = float('inf')
+                            for j in range(search_start, min(search_end, len(unique_coords))):
+                                try:
+                                    c = unique_coords[j]
+                                    dx = float(c[0]) - tx
+                                    dy = float(c[1]) - ty
+                                    d = dx*dx + dy*dy
+                                    if d < best_d:
+                                        best_d = d
+                                        best_i = j
+                                except Exception:
+                                    continue
+                            
+                            nearest = best_i
+                            last_index = nearest  # Update for next waypoint
+                            
                             # guard index range
                             if nearest < 0:
                                 nearest = 0

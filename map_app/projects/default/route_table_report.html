@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Route Table Report</title>
+<style>
+body{font-family:Segoe UI,Helvetica,Arial;margin:12px;color:#222;font-size:13px}
+h1{font-size:18px;margin-bottom:6px}
+.editor-btn{padding:6px 12px;border:none;border-radius:4px;font-size:12px;cursor:pointer;background-color:#007bff;color:#ffffff;transition:background-color .3s}
+.editor-btn:hover{background-color:#0056b3}
+.editor-btn-success{background-color:#28a745}
+.editor-btn-success:hover{background-color:#218838}
+.report-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.report-header .actions{display:flex;gap:8px}
+.report-container{display:flex;flex-direction:column;align-items:center}
+.report-wrapper{width:800px;max-width:100%;box-sizing:border-box}
+.report-box{width:100%;background:#fff;padding:12px;border-radius:6px;box-shadow:0 1px 3px rgba(0,0,0,0.08);margin-bottom:14px;box-sizing:border-box}
+table{width:100%;border-collapse:collapse;margin-top:8px}
+th,td{border:1px solid #e6e6e6;padding:6px 8px;font-size:12px}
+th{background:#f7fafc;font-weight:600}
+small.meta{color:#666;font-size:11px}
+.vehicle-header{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:4px;color:#fff;font-weight:700}
+.vehicle-color-pill{width:12px;height:12px;border-radius:3px;display:inline-block;margin-right:8px}
+.summary{margin-top:8px;color:#444;font-size:12px}
+.toggle-btn{margin-left:auto;background:rgba(255,255,255,0.12);border:0;color:#fff;padding:4px 8px;border-radius:4px;cursor:pointer;font-weight:700}
+.vehicle-body{margin-top:8px;overflow:hidden;max-height:2000px;transition:max-height 260ms ease;padding-top:6px}
+.vehicle-body.collapsed{max-height:0;padding-top:0}
+th.num, td.num{text-align:right}
+.global-summary-grid{width:100%;display:flex;gap:10px;margin:10px 0;padding:0;flex-wrap:wrap}
+.summary-card{flex:1;background:#fff;padding:12px;border-radius:8px;box-shadow:0 2px 6px rgba(0,0,0,0.06);text-align:center;color:#222}
+.summary-card .label{font-size:12px;color:#666;margin-bottom:8px}
+.summary-card .value{font-size:18px;font-weight:800;color:#222}
+</style>
+<script>function toggleVehicleBody(id){var el=document.getElementById(id);var btn=document.getElementById(id+"-btn");if(!el) return; if(el.classList.contains("collapsed")){el.classList.remove("collapsed"); if(btn) btn.textContent="▼";} else {el.classList.add("collapsed"); if(btn) btn.textContent="▲";}} </script>
+</head><body>
+<div class="report-header">
+<div><h1 style="margin:0">Route Table Report</h1><div class="meta"><small class="meta">Generated: 2025-10-16 11:58:41</small></div></div>
+<div class="actions"><button id="download-report-btn" class="editor-btn editor-btn-success">Download HTML</button></div>
+</div>
+<script>
+function downloadReport(){
+  try{
+    var filename="route_table_report.html";
+    var html=document.documentElement.outerHTML;
+    var blob=new Blob([html],{type:"text/html;charset=utf-8"});
+    var url=URL.createObjectURL(blob);
+    var a=document.createElement("a");
+    a.href=url; a.download=filename; document.body.appendChild(a); a.click();
+    setTimeout(function(){ document.body.removeChild(a); URL.revokeObjectURL(url); }, 1000);
+  } catch(e) { console.error(e); alert("Download failed: "+(e && e.message ? e.message : e)); }
+}
+document.addEventListener("DOMContentLoaded", function(){
+  var btn=document.getElementById("download-report-btn"); if(btn) btn.addEventListener("click", downloadReport);
+});
+</script>
+<div class="report-wrapper">
+<div class="global-summary-grid">
+<div class="summary-card"><div class="label">Total Vehicle(EA)</div><div class="value">6</div></div>
+<div class="summary-card"><div class="label">Total Distance(km)</div><div class="value">151.27</div></div>
+<div class="summary-card"><div class="label">Total Time</div><div class="value">11시간 06분</div></div>
+<div class="summary-card"><div class="label">Total Demand(EA)</div><div class="value">88</div></div>
+</div>
+<div class="chart-box report-box" style="padding:10px;display:flex;gap:10px;">
+<div style="flex:1;padding:6px;box-sizing:border-box;"><canvas id="distanceChart" style="width:100%;height:260px"></canvas></div>
+<div style="flex:1;padding:6px;box-sizing:border-box;"><canvas id="timeChart" style="width:100%;height:260px"></canvas></div>
+<div style="flex:1;padding:6px;box-sizing:border-box;"><canvas id="demandChart" style="width:100%;height:260px"></canvas></div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.3.0/dist/chart.umd.min.js"></script>
+<script>
+const _chartLabels = ["1", "2", "3", "4", "5", "6"];
+const _chartData = [27.16, 25.71, 25.11, 24.33, 25.73, 23.22];
+const _chartDemandData = [8.0, 15.0, 19.0, 17.0, 11.0, 18.0];
+const _chartTimeData = [113.73, 110.27, 114.43, 120.76, 101.11, 106.54];
+document.addEventListener("DOMContentLoaded", function(){
+  try{
+    const ctxDist = document.getElementById("distanceChart").getContext("2d");
+    const ctxTime = document.getElementById("timeChart").getContext("2d");
+    const avgDist = _chartData.length ? (_chartData.reduce((a,b)=>a+b,0)/_chartData.length) : 0;
+    const avgTime = _chartTimeData && _chartTimeData.filter(v=>v!==null).length ? (_chartTimeData.filter(v=>v!==null).reduce((a,b)=>a+b,0)/_chartTimeData.filter(v=>v!==null).length) : 0;
+    // plugin to draw value labels above each bar and average at right
+    const dataLabelPlugin = {
+      id: "dataLabelPlugin",
+      afterDatasetDraw(chart, args, options) {
+        const ctx = chart.ctx;
+        chart.data.datasets.forEach((dataset, i) => {
+          const meta = chart.getDatasetMeta(i);
+          if (!meta || meta.type !== "bar") return;
+          meta.data.forEach((bar, idx) => {
+            const val = dataset.data[idx];
+            if (val === null || val === undefined) return;
+            ctx.save();
+            ctx.fillStyle = "#111"; ctx.font = "12px Arial"; ctx.textAlign = "center"; ctx.textBaseline = "bottom";
+            ctx.fillText(String(val), bar.x, bar.y - 6);
+            ctx.restore();
+          });
+        });
+        try {
+          const ds = chart.data && chart.data.datasets && chart.data.datasets[0] ? chart.data.datasets[0].data : null;
+          const avgVal = ds && ds.length ? (ds.reduce((a,b)=>a+(b||0),0)/ds.length) : null;
+          const avgDisplay = (avgVal !== null) ? (Math.round(avgVal * 100) / 100).toFixed(2) : null;
+          if (avgDisplay !== null) {
+            // place average label at the canvas top-right corner (avoids overlapping bars/lines)
+            const x = chart.width - 8;
+            const y = 8;
+            ctx.save(); ctx.fillStyle = "#c00"; ctx.font = "12px Arial"; ctx.textAlign = "right"; ctx.textBaseline = "top";
+            ctx.fillText('Avr: ' + avgDisplay, x, y);
+            ctx.restore();
+          }
+        } catch(e) { /* ignore drawing average failures */ }
+      }
+    };
+    Chart.register(dataLabelPlugin);
+    const distChart = new Chart(ctxDist, { type: "bar", data: { labels: _chartLabels, datasets: [ { label: "Distance (km)", data: _chartData, backgroundColor: "rgba(54,162,235,0.8)", borderColor: "rgba(54,162,235,1)", borderWidth: 1 }, { type: "line", label: "Average", data: Array(_chartData.length).fill(avgDist), borderColor: "rgba(255,99,132,0.9)", borderWidth: 1, pointRadius: 0, borderDash: [6,4], order: 0 } ] }, options: { responsive:true, maintainAspectRatio:false, plugins:{ title:{ display:true, text:"Distance", align:"start", font:{ size:14 } }, legend:{ display:false } }, scales:{ x:{ grid:{ display:false, drawBorder:false } }, y:{ beginAtZero:true, grid:{ display:false, drawBorder:false }, ticks:{ display:false } } } } });
+    const timeChart = new Chart(ctxTime, { type: "bar", data: { labels: _chartLabels, datasets: [ { label: "Time (min)", data: _chartTimeData, backgroundColor: "rgba(75,192,192,0.8)", borderColor: "rgba(75,192,192,1)", borderWidth: 1 }, { type: "line", label: "Average", data: Array(_chartTimeData.length).fill(avgTime), borderColor: "rgba(255,159,64,0.9)", borderWidth: 1, pointRadius: 0, borderDash: [6,4], order: 0 } ] }, options: { responsive:true, maintainAspectRatio:false, plugins:{ title:{ display:true, text:"Time (min)", align:"start", font:{ size:14 } }, legend:{ display:false } }, scales:{ x:{ grid:{ display:false, drawBorder:false } }, y:{ beginAtZero:true, grid:{ display:false, drawBorder:false }, ticks:{ display:false } } } } });
+    try{
+      const ctxDemand = document.getElementById("demandChart").getContext("2d");
+      const avgDemand = _chartDemandData.length ? (_chartDemandData.reduce((a,b)=>a+b,0)/_chartDemandData.length) : 0;
+      const demandChart = new Chart(ctxDemand, { type: "bar", data: { labels: _chartLabels, datasets: [ { label: "Demand (EA)", data: _chartDemandData, backgroundColor: "rgba(255,205,86,0.9)", borderColor: "rgba(255,205,86,1)", borderWidth: 1 }, { type: "line", label: "Average", data: Array(_chartDemandData.length).fill(avgDemand), borderColor: "rgba(153,102,255,0.9)", borderWidth: 1, pointRadius: 0, borderDash: [6,4], order: 0 } ] }, options: { responsive:true, maintainAspectRatio:false, plugins:{ title:{ display:true, text:"Demand (EA)", align:"start", font:{ size:14 } }, legend:{ display:false } }, scales:{ x:{ grid:{ display:false, drawBorder:false } }, y:{ beginAtZero:true, grid:{ display:false, drawBorder:false }, ticks:{ display:false } } } } });
+    } catch(e) { console.warn("Demand chart failed:", e); }
+  } catch(e) { console.error("Chart rendering failed:", e); }
+});
+</script>
+<div class="report-container">
+<div class="report-box">
+<div class="vehicle-header" style="background:#FF6B6B;">
+<span class="vehicle-color-pill" style="background:#FF6B6B;"></span>
+Vehicle 1
+<button id="vehicle-body-0-btn" class="toggle-btn" onclick="toggleVehicleBody('vehicle-body-0')">▼</button>
+</div>
+<div id="vehicle-body-0" class="vehicle-body">
+<table>
+<thead><tr><th class="num">No</th><th>ID</th><th>Name</th><th class="num">Time (min)</th><th class="num">Time (cum, min)</th><th class="num">Distance (km)</th><th class="num">Distance (cum, km)</th><th class="num">Demand</th></tr></thead>
+<tbody>
+<tr>
+<td class="num">1</td>
+<td>FBVU</td>
+<td>test25</td>
+<td class="num">0.0</td>
+<td class="num">0.0</td>
+<td class="num">0.00</td>
+<td class="num">0.00</td>
+<td class="num">1</td>
+</tr>
+<tr>
+<td class="num">2</td>
+<td>QD80</td>
+<td>test20</td>
+<td class="num">24.7</td>
+<td class="num">24.7</td>
+<td class="num">7.53</td>
+<td class="num">7.53</td>
+<td class="num">3</td>
+</tr>
+<tr>
+<td class="num">3</td>
+<td>7T2J</td>
+<td>test6</td>
+<td class="num">29.5</td>
+<td class="num">54.2</td>
+<td class="num">7.33</td>
+<td class="num">14.86</td>
+<td class="num">1</td>
+</tr>
+<tr>
+<td class="num">4</td>
+<td>EADH</td>
+<td>test33</td>
+<td class="num">17.3</td>
+<td class="num">71.5</td>
+<td class="num">2.99</td>
+<td class="num">17.85</td>
+<td class="num">2</td>
+</tr>
+<tr>
+<td class="num">5</td>
+<td>DLS7</td>
+<td>test24</td>
+<td class="num">19.0</td>
+<td class="num">90.4</td>
+<td class="num">4.27</td>
+<td class="num">22.12</td>
+<td class="num">1</td>
+</tr>
+<tr>
+<td class="num">6</td>
+<td>1</td>
+<td>Depot</td>
+<td class="num">23.3</td>
+<td class="num">113.7</td>
+<td class="num">5.04</td>
+<td class="num">27.16</td>
+<td class="num">0</td>
+</tr>
+</tbody></table>
+<div class="summary">Total distance: 27.16 km | Total time: 114 min | Total demand: 8</div>
+</div>
+</div>
+<div class="report-box">
+<div class="vehicle-header" style="background:#4ECDC4;">
+<span class="vehicle-color-pill" style="background:#4ECDC4;"></span>
+Vehicle 2
+<button id="vehicle-body-1-btn" class="toggle-btn" onclick="toggleVehicleBody('vehicle-body-1')">▼</button>
+</div>
+<div id="vehicle-body-1" class="vehicle-body">
+<table>
+<thead><tr><th class="num">No</th><th>ID</th><th>Name</th><th class="num">Time (min)</th><th class="num">Time (cum, min)</th><th class="num">Distance (km)</th><th class="num">Distance (cum, km)</th><th class="num">Demand</th></tr></thead>
+<tbody>
+<tr>
+<td class="num">1</td>
+<td>9V7L</td>
+<td>test14</td>
+<td class="num">0.0</td>
+<td class="num">0.0</td>
+<td class="num">0.00</td>
+<td class="num">0.00</td>
+<td class="num">2</td>
+</tr>
+<tr>
+<td class="num">2</td>
+<td>DXMV</td>
+<td>test17</td>
+<td class="num">22.5</td>
+<td class="num">22.5</td>
+<td class="num">4.61</td>
+<td class="num">4.61</td>
+<td class="num">2</td>
+</tr>
+<tr>
+<td class="num">3</td>
+<td>5ON7</td>
+<td>test34</td>
+<td class="num">14.8</td>
+<td class="num">37.3</td>
+<td class="num">3.30</td>
+<td class="num">7.91</td>
+<td class="num">1</td>
+</tr>
+<tr>
+<td class="num">4</td>
+<td>62B7</td>
+<td>test19</td>
+<td class="num">20.5</td>
+<td class="num">57.8</td>
+<td class="num">6.81</td>
+<td class="num">14.72</td>
+<td class="num">1</td>
+</tr>
+<tr>
+<td class="num">5</td>
+<td>3BDE</td>
+<td>test4</td>
+<td class="num">18.3</td>
+<td class="num">76.1</td>
+<td class="num">3.76</td>
+<td class="num">18.48</td>
+<td class="num">9</td>
+</tr>
+<tr>
+<td class="num">6</td>
+<td>1</td>
+<td>Depot</td>
+<td class="num">34.2</td>
+<td class="num">110.3</td>
+<td class="num">7.24</td>
+<td class="num">25.71</td>
+<td class="num">0</td>
+</tr>
+</tbody></table>
+<div class="summary">Total distance: 25.71 km | Total time: 110 min | Total demand: 15</div>
+</div>
+</div>
+<div class="report-box">
+<div class="vehicle-header" style="background:#45B7D1;">
+<span class="vehicle-color-pill" style="background:#45B7D1;"></span>
+Vehicle 3
+<button id="vehicle-body-2-btn" class="toggle-btn" onclick="toggleVehicleBody('vehicle-body-2')">▼</button>
+</div>
+<div id="vehicle-body-2" class="vehicle-body">
+<table>
+<thead><tr><th class="num">No</th><th>ID</th><th>Name</th><th class="num">Time (min)</th><th class="num">Time (cum, min)</th><th class="num">Distance (km)</th><th class="num">Distance (cum, km)</th><th class="num">Demand</th></tr></thead>
+<tbody>
+<tr>
+<td class="num">1</td>
+<td>WD3U</td>
+<td>test16</td>
+<td class="num">0.0</td>
+<td class="num">0.0</td>
+<td class="num">0.00</td>
+<td class="num">0.00</td>
+<td class="num">2</td>
+</tr>
+<tr>
+<td class="num">2</td>
+<td>141H</td>
+<td>test35</td>
+<td class="num">29.4</td>
+<td class="num">29.4</td>
+<td class="num">6.61</td>
+<td class="num">6.61</td>
+<td class="num">1</td>
+</tr>
+<tr>
+<td class="num">3</td>
+<td>7JWX</td>
+<td>test21</td>
+<td class="num">9.5</td>
+<td class="num">38.9</td>
+<td class="num">2.29</td>
+<td class="num">8.89</td>
+<td class="num">1</td>
+</tr>
+<tr>
+<td class="num">4</td>
+<td>Q72D</td>
+<td>test7</td>
+<td class="num">12.1</td>
+<td class="num">51.1</td>
+<td class="num">3.40</td>
+<td class="num">12.29</td>
+<td class="num">3</td>
+</tr>
+<tr>
+<td class="num">5</td>
+<td>J43P</td>
+<td>test5</td>
+<td class="num">21.3</td>
+<td class="num">72.4</td>
+<td class="num">4.01</td>
+<td class="num">16.30</td>
+<td class="num">7</td>
+</tr>
+<tr>
+<td class="num">6</td>
+<td>YGIB</td>
+<td>test9</td>
+<td class="num">23.2</td>
+<td class="num">95.6</td>
+<td class="num">5.57</td>
+<td class="num">21.88</td>
+<td class="num">5</td>
+</tr>
+<tr>
+<td class="num">7</td>
+<td>1</td>
+<td>Depot</td>
+<td class="num">18.8</td>
+<td class="num">114.4</td>
+<td class="num">3.24</td>
+<td class="num">25.11</td>
+<td class="num">0</td>
+</tr>
+</tbody></table>
+<div class="summary">Total distance: 25.11 km | Total time: 114 min | Total demand: 19</div>
+</div>
+</div>
+<div class="report-box">
+<div class="vehicle-header" style="background:#96CEB4;">
+<span class="vehicle-color-pill" style="background:#96CEB4;"></span>
+Vehicle 4
+<button id="vehicle-body-3-btn" class="toggle-btn" onclick="toggleVehicleBody('vehicle-body-3')">▼</button>
+</div>
+<div id="vehicle-body-3" class="vehicle-body">
+<table>
+<thead><tr><th class="num">No</th><th>ID</th><th>Name</th><th class="num">Time (min)</th><th class="num">Time (cum, min)</th><th class="num">Distance (km)</th><th class="num">Distance (cum, km)</th><th class="num">Demand</th></tr></thead>
+<tbody>
+<tr>
+<td class="num">1</td>
+<td>3NMY</td>
+<td>test18</td>
+<td class="num">0.0</td>
+<td class="num">0.0</td>
+<td class="num">0.00</td>
+<td class="num">0.00</td>
+<td class="num">1</td>
+</tr>
+<tr>
+<td class="num">2</td>
+<td>ADTK</td>
+<td>test13</td>
+<td class="num">12.2</td>
+<td class="num">12.2</td>
+<td class="num">2.48</td>
+<td class="num">2.48</td>
+<td class="num">2</td>
+</tr>
+<tr>
+<td class="num">3</td>
+<td>KXHS</td>
+<td>test29</td>
+<td class="num">20.8</td>
+<td class="num">33.0</td>
+<td class="num">3.30</td>
+<td class="num">5.77</td>
+<td class="num">1</td>
+</tr>
+<tr>
+<td class="num">4</td>
+<td>BTAI</td>
+<td>test12</td>
+<td class="num">12.3</td>
+<td class="num">45.3</td>
+<td class="num">1.89</td>
+<td class="num">7.66</td>
+<td class="num">4</td>
+</tr>
+<tr>
+<td class="num">5</td>
+<td>C3X9</td>
+<td>test1</td>
+<td class="num">29.5</td>
+<td class="num">74.8</td>
+<td class="num">7.83</td>
+<td class="num">15.49</td>
+<td class="num">3</td>
+</tr>
+<tr>
+<td class="num">6</td>
+<td>K4TM</td>
+<td>test26</td>
+<td class="num">13.7</td>
+<td class="num">88.5</td>
+<td class="num">2.73</td>
+<td class="num">18.22</td>
+<td class="num">2</td>
+</tr>
+<tr>
+<td class="num">7</td>
+<td>6N0B</td>
+<td>test10</td>
+<td class="num">11.3</td>
+<td class="num">99.8</td>
+<td class="num">1.97</td>
+<td class="num">20.19</td>
+<td class="num">4</td>
+</tr>
+<tr>
+<td class="num">8</td>
+<td>1</td>
+<td>Depot</td>
+<td class="num">20.9</td>
+<td class="num">120.8</td>
+<td class="num">4.14</td>
+<td class="num">24.33</td>
+<td class="num">0</td>
+</tr>
+</tbody></table>
+<div class="summary">Total distance: 24.33 km | Total time: 121 min | Total demand: 17</div>
+</div>
+</div>
+<div class="report-box">
+<div class="vehicle-header" style="background:#FFEAA7;">
+<span class="vehicle-color-pill" style="background:#FFEAA7;"></span>
+Vehicle 5
+<button id="vehicle-body-4-btn" class="toggle-btn" onclick="toggleVehicleBody('vehicle-body-4')">▼</button>
+</div>
+<div id="vehicle-body-4" class="vehicle-body">
+<table>
+<thead><tr><th class="num">No</th><th>ID</th><th>Name</th><th class="num">Time (min)</th><th class="num">Time (cum, min)</th><th class="num">Distance (km)</th><th class="num">Distance (cum, km)</th><th class="num">Demand</th></tr></thead>
+<tbody>
+<tr>
+<td class="num">1</td>
+<td>M2LZ</td>
+<td>test23</td>
+<td class="num">0.0</td>
+<td class="num">0.0</td>
+<td class="num">0.00</td>
+<td class="num">0.00</td>
+<td class="num">1</td>
+</tr>
+<tr>
+<td class="num">2</td>
+<td>O1XY</td>
+<td>test11</td>
+<td class="num">12.8</td>
+<td class="num">12.8</td>
+<td class="num">3.61</td>
+<td class="num">3.61</td>
+<td class="num">4</td>
+</tr>
+<tr>
+<td class="num">3</td>
+<td>3JNT</td>
+<td>test31</td>
+<td class="num">28.4</td>
+<td class="num">41.2</td>
+<td class="num">7.18</td>
+<td class="num">10.79</td>
+<td class="num">2</td>
+</tr>
+<tr>
+<td class="num">4</td>
+<td>57F8</td>
+<td>test28</td>
+<td class="num">15.8</td>
+<td class="num">57.0</td>
+<td class="num">3.12</td>
+<td class="num">13.91</td>
+<td class="num">2</td>
+</tr>
+<tr>
+<td class="num">5</td>
+<td>0GE1</td>
+<td>test30</td>
+<td class="num">7.7</td>
+<td class="num">64.7</td>
+<td class="num">2.22</td>
+<td class="num">16.13</td>
+<td class="num">2</td>
+</tr>
+<tr>
+<td class="num">6</td>
+<td>1</td>
+<td>Depot</td>
+<td class="num">36.4</td>
+<td class="num">101.1</td>
+<td class="num">9.60</td>
+<td class="num">25.73</td>
+<td class="num">0</td>
+</tr>
+</tbody></table>
+<div class="summary">Total distance: 25.73 km | Total time: 101 min | Total demand: 11</div>
+</div>
+</div>
+<div class="report-box">
+<div class="vehicle-header" style="background:#DDA0DD;">
+<span class="vehicle-color-pill" style="background:#DDA0DD;"></span>
+Vehicle 6
+<button id="vehicle-body-5-btn" class="toggle-btn" onclick="toggleVehicleBody('vehicle-body-5')">▼</button>
+</div>
+<div id="vehicle-body-5" class="vehicle-body">
+<table>
+<thead><tr><th class="num">No</th><th>ID</th><th>Name</th><th class="num">Time (min)</th><th class="num">Time (cum, min)</th><th class="num">Distance (km)</th><th class="num">Distance (cum, km)</th><th class="num">Demand</th></tr></thead>
+<tbody>
+<tr>
+<td class="num">1</td>
+<td>70HV</td>
+<td>test15</td>
+<td class="num">0.0</td>
+<td class="num">0.0</td>
+<td class="num">0.00</td>
+<td class="num">0.00</td>
+<td class="num">2</td>
+</tr>
+<tr>
+<td class="num">2</td>
+<td>C6HP</td>
+<td>test27</td>
+<td class="num">23.7</td>
+<td class="num">23.7</td>
+<td class="num">5.72</td>
+<td class="num">5.72</td>
+<td class="num">3</td>
+</tr>
+<tr>
+<td class="num">3</td>
+<td>55GJ</td>
+<td>test2</td>
+<td class="num">26.0</td>
+<td class="num">49.7</td>
+<td class="num">5.22</td>
+<td class="num">10.94</td>
+<td class="num">8</td>
+</tr>
+<tr>
+<td class="num">4</td>
+<td>CAZU</td>
+<td>test22</td>
+<td class="num">11.2</td>
+<td class="num">60.9</td>
+<td class="num">2.26</td>
+<td class="num">13.20</td>
+<td class="num">2</td>
+</tr>
+<tr>
+<td class="num">5</td>
+<td>P5GU</td>
+<td>test3</td>
+<td class="num">16.3</td>
+<td class="num">77.1</td>
+<td class="num">4.00</td>
+<td class="num">17.20</td>
+<td class="num">2</td>
+</tr>
+<tr>
+<td class="num">6</td>
+<td>X5IH</td>
+<td>test32</td>
+<td class="num">18.3</td>
+<td class="num">95.4</td>
+<td class="num">3.61</td>
+<td class="num">20.81</td>
+<td class="num">1</td>
+</tr>
+<tr>
+<td class="num">7</td>
+<td>1</td>
+<td>Depot</td>
+<td class="num">11.1</td>
+<td class="num">106.5</td>
+<td class="num">2.41</td>
+<td class="num">23.22</td>
+<td class="num">0</td>
+</tr>
+</tbody></table>
+<div class="summary">Total distance: 23.22 km | Total time: 107 min | Total demand: 18</div>
+</div>
+</div>
+</div>
+</div>
+</body></html>

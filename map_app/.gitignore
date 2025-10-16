@@ -54,15 +54,18 @@ Thumbs.db
 # *.csv
 # *.json
 
-# # Ignore everything in projects except default folder and its locations.csv
-# projects/*
-# !projects/default/
-# !projects/default/locations.csv
+# Ignore everything in projects except default folder and its locations.csv
+projects/*
+!projects/default/
+!projects/default/locations.csv
 
-# # Generated files
-# generated_routes.json
-# optimization_routes.csv
-# optimization_summary.csv
-# route_metadata.json
-# distance_matrix.csv
-# time_matrix.csv
+# Generated files
+generated_routes.json
+optimization_routes.csv
+optimization_summary.csv
+route_metadata.json
+distance_matrix.csv
+time_matrix.csv
+
+# test files
+test.ipynb

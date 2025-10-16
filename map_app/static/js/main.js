@@ -1420,7 +1420,7 @@ async function openRouteReport() {
         const url = URL.createObjectURL(blob);
     // open in a popup window (width/height) so it behaves like Full View
     // note: some browsers may block popups; in that case it will open a new tab
-    window.open(url, '_blank', 'width=1200,height=800');
+    window.open(url, '_blank', 'width=1500,height=800');
         // revoke after delay to allow download/view
         setTimeout(() => URL.revokeObjectURL(url), 60 * 1000);
     } catch (e) {

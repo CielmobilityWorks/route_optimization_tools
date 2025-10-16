@@ -1794,48 +1794,35 @@ def generate_routes_from_csv_internal(options: dict | None = None):
                     candidate_id = via_id_candidates[i] if i < len(via_id_candidates) else None
                     vp = resolve_location_by_id_or_name(candidate_id or name)
                     via_points.append(vp)
-                # demand, cumulative_time, cumulative_distance 주입: routes_df의 Load, Route_Time_s, Route_Distance_m 값을 Stop_Order 순서로 매칭
+                # demand 주입: routes_df의 Load 값을 Stop_Order 순서로 매칭
+                # cumulative_time과 cumulative_distance는 T-map API 응답에서만 가져옴 (CSV 값은 부정확함)
                 try:
-                    # name -> Load, Route_Time_s, Route_Distance_m 매핑 리스트를 Stop_Order 순서로 뽑아냄
-                    detail_seq = vehicle_data[['Location_Name', 'Location_Type', 'Load', 'Route_Time_s', 'Route_Distance_m']].to_dict('records')
-                    # 출발지/경유지/도착지 각각에 demand, cumulative_time, cumulative_distance 세팅
+                    # name -> Load 매핑 리스트를 Stop_Order 순서로 뽑아냄
+                    detail_seq = vehicle_data[['Location_Name', 'Location_Type', 'Load']].to_dict('records')
+                    # 출발지/경유지/도착지 각각에 demand 세팅
                     def find_first_detail(name, loc_type):
                         for rec in detail_seq:
                             if str(rec['Location_Name']) == str(name) and str(rec.get('Location_Type', '')) == str(loc_type):
-                                return {
-                                    'demand': int(rec.get('Load', 0) or 0),
-                                    'cumulative_time': float(rec.get('Route_Time_s', 0) or 0),
-                                    'cumulative_distance': float(rec.get('Route_Distance_m', 0) or 0)
-                                }
+                                return {'demand': int(rec.get('Load', 0) or 0)}
                         # 타입이 다를 수 있으니 이름만 매칭하는 폴백
                         for rec in detail_seq:
                             if str(rec['Location_Name']) == str(name):
-                                return {
-                                    'demand': int(rec.get('Load', 0) or 0),
-                                    'cumulative_time': float(rec.get('Route_Time_s', 0) or 0),
-                                    'cumulative_distance': float(rec.get('Route_Distance_m', 0) or 0)
-                                }
-                        return {'demand': 0, 'cumulative_time': 0, 'cumulative_distance': 0}
+                                return {'demand': int(rec.get('Load', 0) or 0)}
+                        return {'demand': 0}
                     # 출발지(depot or waypoint)
                     start_detail = find_first_detail(start_name, vehicle_data.iloc[0].get('Location_Type', ''))
                     start_point['demand'] = start_detail['demand']
-                    start_point['cumulative_time'] = start_detail['cumulative_time']
-                    start_point['cumulative_distance'] = start_detail['cumulative_distance']
                     # 경유지들(waypoint)
                     for i, vp in enumerate(via_points):
                         loc_name = via_names[i]
                         # 해당 via의 타입은 보통 waypoint
                         via_detail = find_first_detail(loc_name, 'waypoint')
                         vp['demand'] = via_detail['demand']
-                        vp['cumulative_time'] = via_detail['cumulative_time']
-                        vp['cumulative_distance'] = via_detail['cumulative_distance']
                     # 도착지(depot or waypoint)
                     end_detail = find_first_detail(end_name, vehicle_data.iloc[-1].get('Location_Type', ''))
                     end_point['demand'] = end_detail['demand']
-                    end_point['cumulative_time'] = end_detail['cumulative_time']
-                    end_point['cumulative_distance'] = end_detail['cumulative_distance']
                 except Exception as _inject_e:
-                    print(f"상세 정보 주입 중 오류(V{vehicle_id}): {_inject_e}")
+                    print(f"demand 정보 주입 중 오류(V{vehicle_id}): {_inject_e}")
                 
             except (ValueError, TypeError) as e:
                 print(f"Vehicle ID 변환 오류: {vehicle_id} - {e}")
@@ -1925,18 +1912,12 @@ def generate_routes_from_csv_internal(options: dict | None = None):
                     # 실제 방문 순서: 출발지 -> 경유지들 -> 도착지
                     all_waypoints = [start_point] + via_points + [end_point]
                     
-                    # Add cumulative_time and cumulative_distance to waypoints
+                    # T-map API 응답에서 이미 cumulative_time과 cumulative_distance가 설정되어 있음
+                    # tmap_route.py의 get_route()에서 각 waypoint에 대한 좌표 기반 매칭으로 설정됨
+                    
+                    # Get total time and distance from route properties
                     total_route_time = float(route_result.get('properties', {}).get('totalTime', 0))
                     total_route_distance = float(route_result.get('properties', {}).get('totalDistance', 0))
-                    
-                    # If waypoints don't have cumulative_time, calculate them
-                    for i, waypoint in enumerate(all_waypoints):
-                        if 'cumulative_time' not in waypoint:
-                            # Distribute time proportionally across waypoints
-                            waypoint['cumulative_time'] = (i / max(1, len(all_waypoints) - 1)) * total_route_time
-                        if 'cumulative_distance' not in waypoint:
-                            # Distribute distance proportionally across waypoints
-                            waypoint['cumulative_distance'] = (i / max(1, len(all_waypoints) - 1)) * total_route_distance
                     
                     # 차량 경로 정보 저장
                     vehicle_routes[str(vehicle_id)] = {
@@ -2110,6 +2091,17 @@ def regenerate_edited_routes():
         if not os.path.exists(edited_csv_path):
             return jsonify({'success': False, 'error': 'edited_routes.csv 파일이 없습니다.'}), 404
         
+        # Remove existing edit-specific report so it will be regenerated after reload
+        try:
+            edit_report_filename = f"{edit_id}_report.html" if edit_id else None
+            if edit_report_filename:
+                edit_report_path = project_path(edit_report_filename, pid, edit_id)
+                if os.path.exists(edit_report_path):
+                    os.remove(edit_report_path)
+                    print(f"🗑️  Removed existing edit report: {edit_report_path}")
+        except Exception as e:
+            print(f"Warning: failed to remove edit report for {edit_id}: {e}")
+
         print("🔄 edited_routes.csv 변경 감지 및 증분 경로 재생성 시작...")
         
         # 요청 본문에서 옵션 읽기
@@ -2461,17 +2453,15 @@ def regenerate_edited_routes():
                     # 실제 방문 순서: 출발지 -> 경유지들 -> 도착지
                     all_waypoints = [start_loc] + via_locs + [end_loc]
                     
-                    # 총 거리/시간
+                    # T-map API 응답에서 이미 cumulative_time과 cumulative_distance가 설정되어 있음
+                    # tmap_route.py의 get_route()에서 각 waypoint에 대한 좌표 기반 매칭으로 설정됨
+                    
+                    # Get total time and distance from route properties
                     total_route_time = float(route_result.get('properties', {}).get('totalTime', 0))
                     total_route_distance = float(route_result.get('properties', {}).get('totalDistance', 0))
                     
-                    # waypoints에 cumulative_time과 cumulative_distance 추가
+                    # CSV의 Load 정보 추가
                     for i, waypoint in enumerate(all_waypoints):
-                        if 'cumulative_time' not in waypoint:
-                            waypoint['cumulative_time'] = (i / max(1, len(all_waypoints) - 1)) * total_route_time
-                        if 'cumulative_distance' not in waypoint:
-                            waypoint['cumulative_distance'] = (i / max(1, len(all_waypoints) - 1)) * total_route_distance
-                        # CSV의 Load 정보 추가
                         matching_row = vehicle_data.iloc[i] if i < len(vehicle_data) else vehicle_data.iloc[-1]
                         waypoint['demand'] = int(matching_row.get('Load', 0))
                     
@@ -2657,6 +2647,89 @@ def update_stop_location():
         import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/generate-edit-report', methods=['POST'])
+def generate_edit_report():
+    """현재 시나리오(edit##) 폴더의 데이터를 사용해서 리포트를 생성하고 edit##_report.html로 저장합니다."""
+    try:
+        pid = get_project_id()
+        eid = get_edit_id()
+        
+        if not eid:
+            return jsonify({'success': False, 'message': 'editId가 필요합니다.'}), 400
+        
+        print(f"📊 리포트 생성 시작: project={pid}, edit={eid}")
+        
+        # edited_routes.json 파일 경로
+        edited_json_path = project_path('edited_routes.json', pid, eid)
+        
+        if not os.path.exists(edited_json_path):
+            return jsonify({
+                'success': False, 
+                'message': f'{eid} 시나리오에 edited_routes.json 파일이 없습니다. 먼저 Reload를 실행하세요.'
+            }), 404
+        
+        # edited_routes.json 읽기
+        with open(edited_json_path, 'r', encoding='utf-8') as f:
+            route_data = json.load(f)
+        
+        # report_generator 함수 임포트 및 호출
+        from utils.report_generator import generate_route_table_report_html
+        
+        # 리포트 HTML 생성
+        report_html = generate_route_table_report_html(project_id=pid, route_data=route_data)
+        
+        # 리포트 파일명: edit##_report.html
+        report_filename = f'{eid}_report.html'
+        report_path = project_path(report_filename, pid, eid)
+        
+        # 리포트 저장
+        with open(report_path, 'w', encoding='utf-8') as f:
+            f.write(report_html)
+        
+        print(f"✅ 리포트 생성 완료: {report_path}")
+        
+        # 리포트 URL 생성
+        report_url = f'/serve-edit-report?projectId={pid}&editId={eid}'
+        
+        return jsonify({
+            'success': True,
+            'message': '리포트가 성공적으로 생성되었습니다.',
+            'reportUrl': report_url,
+            'reportPath': report_path
+        })
+        
+    except Exception as e:
+        print(f"❌ 리포트 생성 오류: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/serve-edit-report')
+def serve_edit_report():
+    """edit## 시나리오의 리포트 파일을 제공합니다."""
+    try:
+        pid = get_project_id()
+        eid = get_edit_id()
+        
+        if not eid:
+            return "editId가 필요합니다.", 400
+        
+        # 리포트 파일명
+        report_filename = f'{eid}_report.html'
+        report_path = project_path(report_filename, pid, eid)
+        
+        if not os.path.exists(report_path):
+            return f"리포트 파일을 찾을 수 없습니다: {report_filename}", 404
+        
+        # 파일의 디렉토리와 파일명 분리
+        report_dir = os.path.dirname(report_path)
+        
+        return send_from_directory(report_dir, report_filename, mimetype='text/html')
+        
+    except Exception as e:
+        print(f"❌ 리포트 제공 오류: {e}")
+        return str(e), 500
 
 if __name__ == '__main__':
     app.run(debug=True)
