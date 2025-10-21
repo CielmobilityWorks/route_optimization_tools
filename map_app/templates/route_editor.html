@@ -8,28 +8,18 @@
     <script src="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.js"></script>
     <link href="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css" rel="stylesheet" />
 
+    <!-- vis-timeline for interactive timeline -->
+    <script src="https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js"></script>
+    <link href="https://unpkg.com/vis-timeline@7.7.3/styles/vis-timeline-graph2d.min.css" rel="stylesheet" type="text/css" />
+
     <link rel="stylesheet" href="{{ url_for('static', filename='css/route-visualization.css') }}">
     <script>
         window.MAPBOX_ACCESS_TOKEN = "{{ mapbox_token }}";
+        // 차량별 색상 팔레트 (지도와 동일)
+        window.ROUTE_COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8', '#F7DC6F'];
     </script>
 
     <style>
-        html, body {
-            height: 100%;
-            /* ensure padding is included in height so page doesn't overflow */
-            box-sizing: border-box;
-        }
-        /* propagate box-sizing to all elements for predictable sizing */
-        *, *::before, *::after { box-sizing: inherit; }
-        body {
-            margin: 0;
-            padding: 12px;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background-color: #f5f5f5;
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
-        }
         .editor-header {
             display: flex;
             justify-content: space-between;
@@ -177,6 +167,7 @@
             <h1>Route Editor</h1>
         </div>
         <div class="editor-controls">
+            <button type="button" class="editor-btn" id="route-editor-download-csv">Download CSV</button>
             <button type="button" class="editor-btn" id="route-editor-reload">Reload</button>
             <button type="button" class="editor-btn editor-btn-success" id="route-editor-view-report">View Report</button>
             <button type="button" class="editor-btn editor-btn-secondary" onclick="window.close()">Close</button>
@@ -194,45 +185,448 @@
     <div class="editor-map-wrapper">
         <div id="route-map"></div>
 
-        <!-- Bottom horizontal route editor panel (replaces top-right Route Information) -->
-        <div id="route-bottom-panel" aria-label="Route Editor Bottom Panel">
-            <!-- Header (table-like) -->
-            <div class="rbp-header">
-                <div class="rbp-col rbp-col-check">✓</div>
-                <div class="rbp-col rbp-col-vehicle">Vehicle</div>
-                <div class="rbp-col rbp-col-dist">Dist</div>
-                <div class="rbp-col rbp-col-time">Time</div>
-                <div class="rbp-col rbp-col-load">Load</div>
-                <div class="rbp-col rbp-col-timeline">Timeline</div>
+        <!-- Interactive Timeline Panel with vis-timeline -->
+        <div id="route-timeline-panel" aria-label="Interactive Route Timeline">
+            <div class="timeline-controls">
+                <button type="button" class="timeline-btn" id="timeline-zoom-in" title="Zoom In">+</button>
+                <button type="button" class="timeline-btn" id="timeline-zoom-out" title="Zoom Out">-</button>
+                <button type="button" class="timeline-btn" id="timeline-fit" title="Fit All">⬌</button>
+                <button type="button" class="timeline-btn timeline-btn-save" id="timeline-save-changes" title="Save Changes" style="display: none;">💾 Save</button>
+                <span id="timeline-changes-indicator" style="display: none; color: #ff9800; margin-left: 8px; font-size: 12px;">●</span>
             </div>
-            <!-- Rows container (populated by route-editor.js) -->
-            <div class="rbp-rows" role="list"></div>
+            <!-- Custom left table overlay -->
+            <div class="timeline-left-table-container">
+                <!-- Table header -->
+                <div class="timeline-table-header">
+                    <div class="th-cell th-check">✓</div>
+                    <div class="th-cell th-no">No</div>
+                    <div class="th-cell th-dist">Distance</div>
+                    <div class="th-cell th-time">Duration</div>
+                    <div class="th-cell th-load">Load</div>
+                </div>
+                <!-- Table rows (populated by JS) -->
+                <div class="timeline-table-body" id="timeline-table-body">
+                    <!-- Rows will be inserted here -->
+                </div>
+            </div>
+            <!-- vis-timeline container -->
+            <div id="vis-timeline-container"></div>
         </div>
 
         <style>
-            /* Bottom panel styles specific to the route editor template */
-            #route-bottom-panel {
+            /* Timeline panel styles for vis-timeline integration */
+            #route-timeline-panel {
                 position: fixed;
                 left: 50%;
-                bottom: 50px;
+                bottom: 20px;
                 transform: translateX(-50%);
-                width: calc(100% - 24px);
-                max-width: 1200px; /* limit overall width */
-                height: 250px;
+                width: calc(100% - 40px);
+                max-width: 1400px;
+                height: 320px;
                 background: rgba(255,255,255,0.98);
-                border-radius: 8px;
-                box-shadow: 0 6px 18px rgba(0,0,0,0.12);
+                border-radius: 12px;
+                box-shadow: 0 8px 24px rgba(0,0,0,0.15);
                 z-index: 11000;
+                overflow: hidden;
+            }
+            
+            .timeline-controls {
+                position: absolute;
+                top: 0;
+                left: 0;
+                right: 0;
+                display: flex;
+                gap: 8px;
+                padding: 4px 12px;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                border-radius: 12px 12px 0 0;
+                align-items: center;
+                height: 30px;
+                box-sizing: border-box;
+                z-index: 5;
+            }
+            
+            .timeline-btn {
+                padding: 4px 8px;
+                border: none;
+                border-radius: 4px;
+                font-size: 12px;
+                cursor: pointer;
+                background-color: rgba(255,255,255,0.2);
+                color: #ffffff;
+                transition: all 0.3s;
+                font-weight: 500;
+            }
+            
+            .timeline-btn:hover {
+                background-color: rgba(255,255,255,0.3);
+                transform: translateY(-1px);
+            }
+            
+            .timeline-btn-primary {
+                background-color: rgba(255,255,255,0.9);
+                color: #667eea;
+                font-weight: 600;
+            }
+            
+            .timeline-btn-primary:hover {
+                background-color: #ffffff;
+            }
+            
+            /* Custom left table overlay */
+            .timeline-left-table-container {
+                position: absolute;
+                left: 0;
+                top: 30px; /* Below controls */
+                width: 272px;
+                height: calc(100% - 30px);
+                background: white;
+                z-index: 10;
                 display: flex;
                 flex-direction: column;
-                gap: 3px; /* tighter vertical spacing */
-                    /* make padding symmetric: top/right/bottom/left */
-                    padding: 8px; /* visually balanced padding on all sides */
+                border-right: 1px solid #dee2e6;
+                box-shadow: none;
+            }
+            
+            /* Timeline table header */
+            .timeline-table-header {
+                display: flex;
+                background: #f8f9fa;
+                border-bottom: 1px solid #dee2e6;
+                font-size: 9px;
+                font-weight: 700;
+                color: #495057;
+                height: 20px;
+                min-height: 20px;
+                max-height: 20px;
+                align-items: center;
+                flex-shrink: 0;
+                line-height: 20px;
+            }
+            
+            .timeline-table-header .th-cell {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 0 2px;
+                border-right: 1px solid rgba(0,0,0,0.06);
+                height: 20px;
+                line-height: 20px;
+            }
+            
+            .timeline-table-header .th-check {
+                width: 30px;
+                min-width: 30px;
+            }
+            
+            .timeline-table-header .th-no {
+                width: 50px;
+                min-width: 50px;
+            }
+            
+            .timeline-table-header .th-dist {
+                width: 70px;
+                min-width: 70px;
+            }
+            
+            .timeline-table-header .th-time {
+                width: 70px;
+                min-width: 70px;
+            }
+            
+            .timeline-table-header .th-load {
+                width: 50px;
+                min-width: 50px;
+            }
+            
+            /* Table body */
+            .timeline-table-body {
+                flex: 1;
+                overflow-y: auto;
+                overflow-x: hidden;
+            }
+            
+            .timeline-table-row {
+                display: flex;
+                align-items: center;
+                height: 20px;
+                border-bottom: 1px solid #e9ecef;
+                font-size: 9px;
+                transition: background-color 0.2s;
+                background-color: white;
+            }
+            
+            .timeline-table-row:hover {
+                background-color: #f8f9fa;
+            }
+            
+            .timeline-table-row .td-cell {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 0 2px;
+                height: 100%;
+            }
+            
+            .timeline-table-row .td-check {
+                width: 30px;
+                min-width: 30px;
+            }
+            
+            .timeline-table-row .td-check input[type="checkbox"] {
+                cursor: pointer;
+                width: 12px;
+                height: 12px;
+            }
+            
+            .timeline-table-row .td-no {
+                width: 50px;
+                min-width: 50px;
+                gap: 4px;
+                font-weight: 700;
+            }
+            
+            .timeline-table-row .td-swatch {
+                width: 6px;
+                height: 6px;
+                border-radius: 1px;
+                flex-shrink: 0;
+            }
+            
+            .timeline-table-row .td-dist,
+            .timeline-table-row .td-time,
+            .timeline-table-row .td-load {
+                justify-content: flex-end;
+                text-align: right;
+            }
+            
+            .timeline-table-row .td-dist {
+                width: 70px;
+                min-width: 70px;
+            }
+            
+            .timeline-table-row .td-time {
+                width: 70px;
+                min-width: 70px;
+            }
+            
+            .timeline-table-row .td-load {
+                width: 50px;
+                min-width: 50px;
+            }
+            
+            #vis-timeline-container {
+                position: absolute;
+                left: 0;
+                top: 30px;
+                right: 0;
+                width: 100%;
+                height: calc(100% - 30px);
+                overflow: visible;
+                padding: 0;
+                background: #ffffff;
+                box-sizing: border-box;
+            }
+            
+            #vis-timeline-container .vis-timeline {
+                width: 100% !important;
+                height: 100% !important;
+            }
+            
+            /* Hide vis-timeline labelset (we're using custom table) */
+            .vis-labelset {
+                opacity: 0;
+                pointer-events: none;
+                width: 272px !important;
+                min-width: 272px !important;
+            }
+            
+            .vis-labelset .vis-label {
+                width: 272px !important;
+            }
+            
+            /* Custom vis-timeline styles */
+            .vis-timeline {
+                border: none;
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                background-color: white;
+            }
+            
+            .vis-panel.vis-background {
+                background-color: white;
+            }
+            
+            /* Override vis-timeline default point/dot styles */
+            .vis-item.vis-dot,
+            .vis-item .vis-dot {
+                border-radius: 50% !important;
+            }
+            
+            /* Background route line */
+            .vis-item.route-line {
+                border-radius: 0;
+                height: 3px !important;
+                opacity: 0.4;
+            }
+            
+            /* Point markers (stops) - basic styles, specifics handled by JS */
+            .vis-item.vis-point {
+                border-radius: 50%;
+                border-width: 2px;
+                border-style: solid;
+                font-size: 10px;
+                font-weight: 700;
+                cursor: move;
+                transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            }
+            
+            .vis-item.vis-point:hover {
+                transform: scale(1.4);
+                z-index: 999;
+            }
+            
+            .vis-item.vis-point.vis-selected {
+                border-width: 3px;
+                transform: scale(1.3);
+                z-index: 1000;
+            }
+            
+            /* Content styling */
+            .vis-item .vis-item-content {
+                padding: 0;
+                white-space: nowrap;
+                overflow: visible;
+            }
+            
+            /* Group labels */
+            .vis-labelset .vis-label {
+                border-bottom: 1px solid #e9ecef;
+                font-weight: 600;
+                color: #333;
+                font-size: 9px;
+                padding: 0 !important;
+                height: 20px !important;
+                line-height: 20px !important;
+                background-color: white !important;
+            }
+            
+            /* vis-timeline group rows height */
+            .vis-foreground .vis-group {
+                height: 20px !important;
+                min-height: 20px !important;
+                border-bottom: 1px solid #e9ecef;
+                background-color: white !important;
+            }
+            
+            /* vis-timeline panel height adjustment */
+            .vis-panel.vis-center,
+            .vis-panel.vis-left,
+            .vis-panel.vis-right {
+                height: auto !important;
+            }
+            
+            /* Remove alternating background */
+            .vis-group:nth-child(even),
+            .vis-group:nth-child(odd) {
+                background-color: white !important;
+            }
+            
+            /* Timeline group table structure */
+            .timeline-group-table {
+                display: grid;
+                grid-template-columns: 30px 50px 70px 70px 50px;
+                gap: 2px;
+                align-items: center;
+                height: 100%;
+                padding: 4px 8px;
+                font-size: 10px;
+            }
+            
+            .timeline-group-table .tg-cell {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 2px 4px;
+                white-space: nowrap;
                 overflow: hidden;
-                font-size: 11px; /* reduced font size */
+                text-overflow: ellipsis;
+            }
+            
+            .timeline-group-table .tg-check {
+                justify-content: center;
+            }
+            
+            .timeline-group-table .tg-check input[type="checkbox"] {
+                margin: 0;
+                cursor: pointer;
+                width: 14px;
+                height: 14px;
+            }
+            
+            .timeline-group-table .tg-no {
+                gap: 4px;
+                font-weight: 700;
+            }
+            
+            .timeline-group-table .tg-swatch {
+                display: inline-block;
+                width: 8px;
+                height: 8px;
+                border-radius: 2px;
+                flex-shrink: 0;
+            }
+            
+            .timeline-group-table .tg-no-text {
+                font-weight: 700;
+            }
+            
+            .timeline-group-table .tg-dist,
+            .timeline-group-table .tg-time,
+            .timeline-group-table .tg-load {
+                justify-content: flex-end;
+                text-align: right;
+            }
+            
+            .vis-time-axis .vis-text {
+                color: #666;
+                font-size: 9px;
+                padding: 0 !important;
+                line-height: 20px !important;
+            }
+            
+            .vis-time-axis {
+                height: 20px !important;
+                min-height: 20px !important;
+                max-height: 20px !important;
+            }
+            
+            .vis-time-axis .vis-grid.vis-minor,
+            .vis-time-axis .vis-grid.vis-major {
+                height: 20px !important;
+            }
+            
+            .vis-panel.vis-top {
+                height: 20px !important;
+                min-height: 20px !important;
+                max-height: 20px !important;
+                background-color: #f8f9fa !important;
+                border-bottom: 1px solid #dee2e6 !important;
+            }
+            
+            /* Tooltip styling */
+            .vis-tooltip {
+                background: rgba(0,0,0,0.9) !important;
+                color: white !important;
+                border-radius: 8px !important;
+                padding: 12px 16px !important;
+                font-size: 13px !important;
+                box-shadow: 0 8px 24px rgba(0,0,0,0.3) !important;
+                max-width: 300px !important;
+                white-space: pre-line !important;
+                line-height: 1.6 !important;
             }
 
-            /* Use grid for header and rows so columns align precisely */
+            /* Legacy bottom panel styles (kept for compatibility) */
             #route-bottom-panel .rbp-row {
                 display: grid;
                     /* Left block (first 5 columns) total outer width (including padding/border) + gaps = 300px
@@ -375,26 +769,29 @@
 
             /* Stop markers on timeline */
             #route-bottom-panel .rbp-stop-marker {
-                position: absolute;
-                top: 50%;
-                transform: translate(-50%, -50%);
-                width: 14px; /* slightly larger */
-                height: 14px; /* slightly larger */
-                border-radius: 50%;
-                background: white;
-                border: 2px solid;
-                cursor: pointer;
-                transition: all 0.2s;
-                z-index: 10;
-                box-shadow: 0 1px 2px rgba(0,0,0,0.2);
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                font-size: 10px;
-                font-weight: 700;
-                line-height: 1;
-                color: #6c757d; /* 회색 레이블 */
-                user-select: none;
+                position: absolute !important;
+                top: 50% !important;
+                transform: translate(-50%, -50%) !important;
+                width: 14px !important; /* slightly larger */
+                height: 14px !important; /* slightly larger */
+                border-radius: 50% !important;
+                background: white !important;
+                border: 2px solid !important;
+                cursor: pointer !important;
+                transition: all 0.2s !important;
+                z-index: 10 !important;
+                box-shadow: 0 1px 2px rgba(0,0,0,0.2) !important;
+                display: inline-flex !important; /* inline-flex for more precise centering */
+                align-items: center !important;
+                justify-content: center !important;
+                text-align: center !important;
+                font-size: 10px !important;
+                font-weight: 700 !important;
+                line-height: 14px !important; /* match height for vertical centering */
+                padding: 0 !important;
+                box-sizing: border-box !important;
+                color: #6c757d !important; /* 회색 레이블 */
+                user-select: none !important;
             }
 
             #route-bottom-panel .rbp-stop-marker:hover {
@@ -409,29 +806,7 @@
                 height: 14px;
             }
 
-            /* Tooltip styling for markers (shown on click via .show-tooltip) */
-            #route-bottom-panel .rbp-stop-marker.show-tooltip[title]::after {
-                content: attr(title);
-                position: absolute;
-                bottom: 100%;
-                left: 50%;
-                transform: translateX(-50%);
-                background: rgba(0,0,0,0.85);
-                color: white;
-                padding: 6px 10px;
-                border-radius: 4px;
-                font-size: 8px; /* 작게 표시 */
-                display: block;
-                white-space: pre; /* respect explicit newlines, prevent soft-wrapping */
-                line-height: 1.5; /* 줄간격 넓혀 가독성 향상 */
-                max-width: 90vw; /* prevent overflowing the viewport */
-                overflow: visible;
-                margin-bottom: 6px;
-                pointer-events: none;
-                z-index: 1000;
-                box-sizing: border-box;
-            }
-
+            
             /* Header: left-align all header columns (except the check column stays centered) */
             #route-bottom-panel .rbp-header .rbp-col {
                 text-align: left;
@@ -504,6 +879,69 @@
             /* Make rows slightly separated */
             #route-bottom-panel .rbp-row + .rbp-row {
                 margin-top: 1.5px; /* slight gap between rows */
+            }
+            /* --- Timeline border / separator overrides ---
+               Remove visual borders and horizontal separators inside the editor timeline
+               without changing structural layout. Uses !important to override inline
+               vis-timeline defaults and earlier rules in this file. */
+
+            /* Remove outer panel border/shadow so the timeline appears borderless */
+            #route-timeline-panel {
+                box-shadow: none !important;
+                border: none !important;
+                background: rgba(255,255,255,0.95) !important;
+            }
+
+            /* Remove left-table vertical divider and all horizontal separators inside timeline */
+            .timeline-left-table-container,
+            .timeline-table-header,
+            .timeline-table-header .th-cell,
+            .timeline-table-row,
+            .timeline-table-row .td-cell,
+            .vis-labelset .vis-label,
+            .vis-foreground .vis-group,
+            .vis-panel.vis-top {
+                border: none !important;
+                border-bottom: none !important;
+                border-right: none !important;
+                box-shadow: none !important;
+                background-color: transparent !important;
+            }
+
+            /* Ensure time axis and grid lines are hidden */
+            .vis-time-axis .vis-grid.vis-minor,
+            .vis-time-axis .vis-grid.vis-major,
+            .vis-panel.vis-top {
+                border-bottom: none !important;
+            }
+
+            /* Make vis panels clean and remove any remaining thin lines */
+            .vis-labelset,
+            .vis-labelset .vis-label {
+                border: none !important;
+            }
+
+            /* Clear background for the timeline container so no subtle lines remain */
+            #vis-timeline-container,
+            .vis-panel.vis-background {
+                background: transparent !important;
+            }
+            /* Ensure marker text/content is rendered above the marker graphics */
+            .vis-item .vis-item-content {
+                position: relative !important;
+                z-index: 3000 !important; /* ensure text/content sits above marker */
+                pointer-events: auto !important;
+            }
+
+            /* Keep the marker shapes slightly lower so content (text) overlays them */
+            .vis-item.vis-point,
+            .vis-item .vis-dot {
+                z-index: 2000 !important;
+            }
+
+            /* Special case: when hovered, still allow content to be above but keep hover effects */
+            .vis-item.vis-point:hover {
+                z-index: 2500 !important;
             }
         </style>
     </div>

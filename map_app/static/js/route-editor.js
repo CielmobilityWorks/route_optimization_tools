@@ -44,9 +44,16 @@
         return '';
     }
 
+    // Expose to other modules/IFRAMEs so marker-dragging section can reuse
+    try {
+        window.resolveProjectQuery = resolveProjectQuery;
+    } catch (e) {
+        // ignore in non-window environments
+    }
+
     function buildUrlWithEditId(baseUrl, editId) {
         const params = new URLSearchParams();
-        const query = resolveProjectQuery();
+    const query = (typeof window.resolveProjectQuery === 'function') ? window.resolveProjectQuery() : (typeof resolveProjectQuery === 'function' ? resolveProjectQuery() : '');
         if (query) {
             const existing = new URLSearchParams(query.startsWith('?') ? query.slice(1) : query);
             existing.forEach((value, key) => params.set(key, value));
@@ -367,6 +374,18 @@
         }
     }
 
+    function downloadEditedRoutesCSV() {
+        if (!currentEditId) {
+            alert('먼저 편집 시나리오를 선택하거나 생성하세요.');
+            return;
+        }
+        
+        const urlParams = new URLSearchParams(window.location.search);
+        const projectId = urlParams.get('projectId') || 'default';
+        const downloadUrl = `/download-edited-routes?projectId=${encodeURIComponent(projectId)}&editId=${encodeURIComponent(currentEditId)}`;
+        window.location.href = downloadUrl;
+    }
+
     async function loadGeneratedRoutes() {
         if (!currentEditId) {
             console.log('No edit scenario selected yet.');
@@ -421,6 +440,14 @@
             });
         }
         
+        // Setup download CSV button
+        const downloadCsvBtn = document.getElementById('route-editor-download-csv');
+        if (downloadCsvBtn) {
+            downloadCsvBtn.addEventListener('click', () => {
+                downloadEditedRoutesCSV();
+            });
+        }
+        
         // Setup view report button
         const viewReportBtn = document.getElementById('route-editor-view-report');
         if (viewReportBtn) {
@@ -449,320 +476,1058 @@
             await loadGeneratedRoutes();
         }
     });
-    
-/* Bottom panel rendering: creates rows for each vehicle with left meta and right timeline with time scale and stop markers */
-function renderBottomRoutePanel(vehicleRoutes) {
-    const panel = document.getElementById('route-bottom-panel');
-    if (!panel) {
+
+/* ========== VIS-TIMELINE INTEGRATION ========== */
+
+// Global timeline instance and data
+let timelineInstance = null;
+let timelineGroups = new vis.DataSet();
+let timelineItems = new vis.DataSet();
+let vehicleRoutesData = {}; // Store current route data
+let hasUnsavedChanges = false; // Track unsaved changes
+
+/* Initialize vis-timeline */
+function initializeTimeline() {
+    const container = document.getElementById('vis-timeline-container');
+    if (!container) {
+        console.error('Timeline container not found');
         return;
     }
-    // Rows container inside panel
-    let rowsContainer = panel.querySelector('.rbp-rows');
-    if (!rowsContainer) {
-        rowsContainer = document.createElement('div');
-        rowsContainer.className = 'rbp-rows';
-        panel.appendChild(rowsContainer);
+
+    // Timeline options
+    const options = {
+        editable: {
+            add: false,         // Don't allow adding new items
+            updateTime: true,   // Allow dragging items horizontally (time)
+            updateGroup: true,  // Allow dragging items between groups (vehicles)
+            remove: false,      // Don't allow removing items
+            overrideItems: false
+        },
+        stack: false,          // Don't stack items (for cleaner line view)
+        horizontalScroll: true,
+        zoomable: true,
+        moveable: true,
+        groupHeightMode: 'fixed',  // Fixed height for groups
+        height: '100%',
+        selectable: true,
+        multiselect: false,
+        snap: null,            // No snapping - free movement
+        onMove: function(item, callback) {
+            // Validate collision only on drop (when movement is complete)
+            if (item.type === 'point' && item.editable !== false) {
+                const collision = checkMarkerCollisionOnDrop(item);
+                if (collision) {
+                    // Revert the move
+                    callback(null);
+                    showNotification('Cannot place marker: too close to another stop (min 1 minute gap required)', 'warning');
+                    return;
+                }
+            }
+            
+            // Accept the move
+            callback(item);
+            
+            // Auto-save immediately after successful drop
+            console.log('✅ Drop accepted, updating data and saving...');
+            setTimeout(() => {
+                // Update vehicleRoutesData from current timeline order
+                updateVehicleRoutesDataFromTimeline();
+                // Save to backend
+                saveTimelineChangesImmediate();
+            }, 100);
+        },
+        timeAxis: {
+            scale: 'minute',
+            step: 10            // Show time labels every 10 minutes
+        },
+        format: {
+            minorLabels: {
+                minute: 'HH:mm',
+                hour: 'HH:mm'
+            },
+            majorLabels: {
+                minute: 'HH:mm',
+                hour: 'ddd D MMMM'
+            }
+        },
+        locale: 'ko',
+        margin: {
+            item: {
+                horizontal: 0,
+                vertical: 18
+            },
+            axis: 10
+        },
+        orientation: 'top',
+        verticalScroll: false,
+        zoomKey: 'ctrlKey',    // Zoom with Ctrl + scroll
+        height: '100%'
+    };
+
+    // Initialize timeline
+    timelineInstance = new vis.Timeline(container, timelineItems, timelineGroups, options);
+
+    // Add CSS to ensure consistent row height (20px - matching left table)
+    if (!document.getElementById('vis-timeline-custom-height')) {
+        const style = document.createElement('style');
+        style.id = 'vis-timeline-custom-height';
+        style.textContent = `
+            /* 1) 라벨 영역(왼쪽 테이블) */
+            .vis-timeline .vis-labelset .vis-label {
+                height: 20px !important;
+                border: none !important;
+                background-color: white !important;
+            }
+            .vis-timeline .vis-labelset .vis-label .vis-inner {
+                line-height: 20px !important;  /* 텍스트 수직 가운데 */
+                padding: 0 8px !important;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
+
+            /* 2) 그룹 배경/전경(오른쪽 타임라인의 행 배경) */
+            .vis-timeline .vis-itemset .vis-background .vis-group,
+            .vis-timeline .vis-itemset .vis-foreground .vis-group {
+                height: 20px !important;
+                border: none !important;
+            }
+
+            /* 3) range 아이템 높이(단순 배경 막대 - 시각화용) */
+            .vis-timeline .vis-item.vis-range {
+                height: 4px !important;
+                line-height: 4px !important;
+                padding: 0 !important;
+            }
+
+            /* range 아이템 내 dot 숨김 (불필요) */
+            .vis-timeline .vis-item.vis-range .vis-dot {
+                display: none !important;
+            }
+            
+            /* ===== Waypoint Markers (원형 마커) ===== */
+            /* Point 타입 아이템: arrival_time에 표시되는 원형 마커 */
+            .vis-timeline .vis-item.vis-point {
+                background: transparent;
+                border: none;
+                padding: 0;
+            }
+            
+            /* 좌측 테이블과 우측 타임라인 테두리 제거 */
+            .timeline-left-table-container {
+                border-right: none !important;
+                background: white !important;
+            }
+            
+            /* 좌측 테이블 헤더 하단 테두리 (강제 적용) */
+            #route-timeline-panel .timeline-table-header {
+                border: none !important;
+                border-bottom: 2px solid #dee2e6 !important;
+                background: #f8f9fa !important;
+            }
+            
+            .timeline-table-row {
+                border: none !important;
+                border-bottom: none !important;
+            }
+            
+            .timeline-table-header .th-cell,
+            .timeline-table-row .td-cell {
+                border: none !important;
+                border-right: none !important;
+            }
+            
+            /* vis-timeline 전체 테두리 제거 */
+            .vis-timeline,
+            #vis-timeline-container {
+                border: none !important;
+            }
+            
+            .vis-panel {
+                border: none !important;
+            }
+            
+            /* vis-top (시간축 헤더) 하단 테두리 (강제 적용) */
+            #vis-timeline-container .vis-panel.vis-top {
+                border: none !important;
+                border-bottom: 2px solid #dee2e6 !important;
+                background: #f8f9fa !important;
+            }
+
+            /* ===== Unified Point Marker Style ===== */
+            /* Use highly specific selector to override vis-timeline default styles */
+            #vis-timeline-container .vis-timeline .vis-item.unified-waypoint .vis-dot {
+                width: 12px !important;
+                height: 12px !important;
+                border-radius: 50% !important;
+                background-color: white !important;
+                border-width: 2px !important;
+                border-style: solid !important;
+                border-color: inherit !important;
+                box-sizing: border-box !important;
+                z-index: 100 !important;
+                top: 50% !important;
+                transform: translateY(-25%) !important;
+                transition: all 0.2s ease !important;
+            }
+            
+            /* Hover effect for draggable markers */
+            #vis-timeline-container .vis-timeline .vis-item.unified-waypoint .vis-dot:hover {
+                width: 16px !important;
+                height: 16px !important;
+                cursor: move !important;
+                box-shadow: 0 0 8px rgba(0,0,0,0.3) !important;
+            }
+            
+            /* Active/dragging effect */
+            #vis-timeline-container .vis-timeline .vis-item.unified-waypoint.vis-selected .vis-dot {
+                width: 16px !important;
+                height: 16px !important;
+                box-shadow: 0 0 12px rgba(0,0,0,0.4) !important;
+            }
+            
+            /* Non-editable markers (depot, start, end) */
+            #vis-timeline-container .vis-timeline .vis-item.unified-waypoint.vis-readonly .vis-dot {
+                opacity: 0.6 !important;
+            }
+            
+            #vis-timeline-container .vis-timeline .vis-item.unified-waypoint.vis-readonly .vis-dot:hover {
+                width: 12px !important;
+                height: 12px !important;
+                cursor: not-allowed !important;
+                box-shadow: none !important;
+            }
+            
+            /* Collision effect */
+            .marker-collision .vis-dot {
+                animation: collisionPulse 0.5s ease-out !important;
+            }
+            
+            @keyframes collisionPulse {
+                0%, 100% {
+                    box-shadow: 0 0 0 0 rgba(255, 0, 0, 0.7);
+                }
+                50% {
+                    box-shadow: 0 0 0 10px rgba(255, 0, 0, 0);
+                }
+            }
+        `;
+        document.head.appendChild(style);
     }
-    // Clear only rows
-    rowsContainer.innerHTML = '';
+
+    // Force redraw after initialization to ensure proper rendering
+    setTimeout(() => {
+        if (timelineInstance) {
+            timelineInstance.redraw();
+            timelineInstance.fit();
+        }
+    }, 100);
+
+    // Event listeners
+    timelineInstance.on('changed', onTimelineChanged);
+    
+    // Drag and drop event listener
+    timelineInstance.on('itemover', function (properties) {
+        // Change cursor to indicate draggable
+        if (properties.item) {
+            const item = timelineItems.get(properties.item);
+            if (item && item.type === 'point') {
+                properties.event.target.style.cursor = 'move';
+            }
+        }
+    });
+    
+    timelineInstance.on('itemout', function (properties) {
+        properties.event.target.style.cursor = 'default';
+    });
+    
+    // Handle item moved (drag and drop)
+    timelineInstance.on('drop', function (properties) {
+        console.log('📦 Item dropped:', properties);
+    });
+    
+    // Handle group change (drag between vehicles)
+    let draggedItem = null;
+    let originalGroup = null;
+    
+    timelineInstance.on('select', function (properties) {
+        if (properties.items && properties.items.length > 0) {
+            const itemId = properties.items[0];
+            const item = timelineItems.get(itemId);
+            if (item && item.type === 'point' && item.originalData) {
+                draggedItem = item;
+                originalGroup = item.group;
+                console.log('🎯 Selected item:', itemId, 'from vehicle:', originalGroup);
+            }
+        }
+    });
+    
+    timelineInstance.on('timechange', function (properties) {
+        if (draggedItem && properties.id) {
+            const updatedItem = timelineItems.get(properties.id);
+            if (updatedItem && updatedItem.group !== originalGroup) {
+                console.log('🚚 Item moved from', originalGroup, 'to', updatedItem.group);
+                handleWaypointGroupChange(properties.id, originalGroup, updatedItem.group);
+                originalGroup = updatedItem.group;
+            }
+        }
+    });
+    
+    timelineInstance.on('timechanged', function (properties) {
+        console.log('📍 timechanged event fired:', properties);
+        if (draggedItem && properties.id) {
+            const updatedItem = timelineItems.get(properties.id);
+            if (updatedItem) {
+                console.log('⏰ Time changed for item:', properties.id, 'New time:', updatedItem.start);
+                handleWaypointTimeChange(properties.id, updatedItem.start);
+            }
+        }
+        draggedItem = null;
+        originalGroup = null;
+    });
+    
+    // Control button handlers
+    document.getElementById('timeline-zoom-in')?.addEventListener('click', () => {
+        timelineInstance.zoomIn(0.5);
+    });
+    
+    document.getElementById('timeline-zoom-out')?.addEventListener('click', () => {
+        timelineInstance.zoomOut(0.5);
+    });
+    
+    document.getElementById('timeline-fit')?.addEventListener('click', () => {
+        timelineInstance.fit();
+    });
+    
+    document.getElementById('timeline-save-changes')?.addEventListener('click', () => {
+        saveTimelineChanges();
+    });
+
+    console.log('✅ vis-timeline initialized with drag & drop support');
+}
+
+/* Update vehicleRoutesData from current timeline order */
+function updateVehicleRoutesDataFromTimeline() {
+    console.log('🔄 Updating vehicleRoutesData from timeline...');
+    
+    // Get all point items from timeline
+    const allItems = timelineItems.get({
+        filter: (item) => item.type === 'point'
+    });
+    
+    // Group items by vehicle
+    const itemsByVehicle = {};
+    allItems.forEach(item => {
+        if (!itemsByVehicle[item.group]) {
+            itemsByVehicle[item.group] = [];
+        }
+        itemsByVehicle[item.group].push(item);
+    });
+    
+    // Sort each vehicle's items by start time (arrival_time)
+    Object.keys(itemsByVehicle).forEach(vehicleId => {
+        const items = itemsByVehicle[vehicleId];
+        items.sort((a, b) => {
+            const timeA = new Date(a.start).getTime();
+            const timeB = new Date(b.start).getTime();
+            return timeA - timeB;
+        });
+        
+        // Update waypoints array in order
+        if (vehicleRoutesData[vehicleId]) {
+            const newWaypoints = items.map(item => {
+                if (item.originalData && item.originalData.waypoint) {
+                    return {
+                        ...item.originalData.waypoint,
+                        arrival_time: item.start.toISOString(),
+                        location_id: item.originalData.waypoint.location_id || item.originalData.waypoint.id
+                    };
+                }
+                return null;
+            }).filter(wp => wp !== null);
+            
+            vehicleRoutesData[vehicleId].waypoints = newWaypoints;
+            console.log(`  🚗 Vehicle ${vehicleId}: ${newWaypoints.length} waypoints reordered`);
+        }
+    });
+    
+    console.log('✅ vehicleRoutesData updated from timeline');
+}
+
+/* Check for marker collision on drop (simple and fast) */
+function checkMarkerCollisionOnDrop(droppedItem) {
+    if (!droppedItem || !droppedItem.start || !droppedItem.group) {
+        return false;
+    }
+    
+    const MIN_TIME_DIFF = 60 * 1000; // Minimum 1 minute between markers
+    const droppedTime = new Date(droppedItem.start).getTime();
+    const droppedGroup = droppedItem.group;
+    
+    // Get all point items in the same group
+    const allItems = timelineItems.get({
+        filter: (item) => {
+            return item.type === 'point' && 
+                   item.group === droppedGroup && 
+                   item.id !== droppedItem.id;
+        }
+    });
+    
+    // Check each item for collision
+    for (let item of allItems) {
+        const itemTime = new Date(item.start).getTime();
+        const timeDiff = Math.abs(droppedTime - itemTime);
+        
+        if (timeDiff < MIN_TIME_DIFF) {
+            console.log('❌ Drop rejected: too close to', item.id, '(', timeDiff, 'ms gap, need', MIN_TIME_DIFF, 'ms)');
+            return true; // Collision detected
+        }
+    }
+    
+    return false; // No collision
+}
+
+/* Add row to custom left table */
+function addTableRow(vehicleId, vehicleNumber, color, distText, timeText, loadText) {
+    const tbody = document.getElementById('timeline-table-body');
+    if (!tbody) return;
+    
+    const row = document.createElement('div');
+    row.className = 'timeline-table-row';
+    row.dataset.vehicleId = vehicleId;
+    
+    row.innerHTML = `
+        <div class="td-cell td-check">
+            <input type="checkbox" checked data-vehicle-id="${vehicleId}" class="route-checkbox">
+        </div>
+        <div class="td-cell td-no">
+            <span class="td-swatch" style="background:${color};"></span>
+            <span>${vehicleNumber}</span>
+        </div>
+        <div class="td-cell td-dist">${distText}</div>
+        <div class="td-cell td-time">${timeText}</div>
+        <div class="td-cell td-load">${loadText}</div>
+    `;
+    
+    tbody.appendChild(row);
+    
+    // Add checkbox event listener
+    const checkbox = row.querySelector('.route-checkbox');
+    if (checkbox) {
+        checkbox.addEventListener('change', function() {
+            const vid = this.dataset.vehicleId;
+            const isChecked = this.checked;
+            console.log(`📋 Checkbox changed: Vehicle ${vid}, checked: ${isChecked}`);
+            
+            if (typeof toggleRouteVisibility === 'function') {
+                toggleRouteVisibility(vid, isChecked);
+            }
+        });
+    }
+}
+
+/* Convert vehicle routes to vis-timeline format */
+function renderBottomRoutePanel(vehicleRoutes) {
+    // Store data globally for recalculation
+    // Normalize the data: ensure waypoints array exists
+    vehicleRoutesData = {};
+    
+    Object.entries(vehicleRoutes).forEach(([vehicleId, vehicleRoute]) => {
+        // Create normalized waypoints array
+        let waypoints = [];
+        
+        // Include start_point first (if exists)
+        if (vehicleRoute.start_point) {
+            waypoints.push({
+                ...vehicleRoute.start_point,
+                location_id: vehicleRoute.start_point.id,
+                isStart: true
+            });
+        }
+        
+        // Add via_points or waypoints
+        if (vehicleRoute.via_points && Array.isArray(vehicleRoute.via_points)) {
+            waypoints.push(...vehicleRoute.via_points.map(wp => ({
+                ...wp,
+                location_id: wp.id
+            })));
+        } else if (vehicleRoute.waypoints && Array.isArray(vehicleRoute.waypoints)) {
+            waypoints.push(...vehicleRoute.waypoints.map(wp => ({
+                ...wp,
+                location_id: wp.id || wp.location_id
+            })));
+        }
+        
+        // Include end_point last (if exists)
+        if (vehicleRoute.end_point) {
+            waypoints.push({
+                ...vehicleRoute.end_point,
+                location_id: vehicleRoute.end_point.id,
+                isEnd: true
+            });
+        }
+        
+        // Store normalized data
+        vehicleRoutesData[vehicleId] = {
+            ...vehicleRoute,
+            waypoints: waypoints  // Normalized waypoints array with location_id
+        };
+    });
+    
+    console.log('📊 Normalized vehicleRoutesData:', vehicleRoutesData);
+    
+    if (!timelineInstance) {
+        initializeTimeline();
+    }
+    
+    if (!timelineInstance) {
+        console.error('Failed to initialize timeline');
+        return;
+    }
+
+    // Clear existing data
+    timelineGroups.clear();
+    timelineItems.clear();
+    
+    // Clear custom table
+    const tbody = document.getElementById('timeline-table-body');
+    if (tbody) {
+        tbody.innerHTML = '';
+    }
 
     const colors = window.ROUTE_COLORS || ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8', '#F7DC6F'];
-    let idx = 0;
-
-    // 1) Find maximum time across all vehicles for timeline scale
-    let maxTime = 0;
-    Object.values(vehicleRoutes).forEach((vr) => {
-        const totalTime = vr.total_time || 0;
-        if (totalTime > maxTime) maxTime = totalTime;
-    });
-
-    // If no time data, use a default
-    if (maxTime === 0) maxTime = 3600; // 1 hour default
-
-    // 2) Create time scale ticks (every 10 minutes or appropriate interval)
-    const timeInterval = calculateTimeInterval(maxTime);
     
-    Object.values(vehicleRoutes).forEach((vr) => {
-        const vehicleId = vr.vehicle_id || (`v_${idx}`);
-        const row = document.createElement('div');
-        row.className = 'rbp-row';
+    // Sort vehicle routes by vehicle_id to match map rendering order
+    const sortedVehicleEntries = Object.entries(vehicleRoutes).sort((a, b) => {
+        const idA = a[1].vehicle_id || a[0];
+        const idB = b[1].vehicle_id || b[0];
+        return String(idA).localeCompare(String(idB));
+    });
+    
+    let groupIndex = 0;
 
-        // Create cells directly on the row to align with header grid
-        // 1) Checkbox cell
-        const chk = document.createElement('div');
-        chk.className = 'rbp-cell rbp-cell-check';
-        const input = document.createElement('input');
-        input.type = 'checkbox';
-        input.checked = true;
-        input.dataset.vehicleId = vehicleId;
-        input.className = 'route-checkbox';
-        input.id = `route-check-${vehicleId}`;
+    // Convert each vehicle route to timeline format
+    sortedVehicleEntries.forEach(([vehicleId, vehicleRoute]) => {
+        const color = colors[groupIndex % colors.length];
         
-        // Add event listener for checkbox toggle
-        input.addEventListener('change', function() {
-            console.log(`📋 Bottom panel checkbox changed: Vehicle ${vehicleId}, checked: ${this.checked}`);
-            if (typeof toggleRouteVisibility === 'function') {
-                toggleRouteVisibility(vehicleId, this.checked);
-            } else {
-                console.warn('toggleRouteVisibility function not found');
-            }
-        });
+        // Add group (vehicle)
+        const endPoint = vehicleRoute.end_point || (vehicleRoute.waypoints && vehicleRoute.waypoints.length > 0 ? vehicleRoute.waypoints[vehicleRoute.waypoints.length - 1] : null);
         
-        chk.appendChild(input);
-        row.appendChild(chk);
-
-        // 2) Vehicle cell (swatch + name)
-        const vcell = document.createElement('div');
-        vcell.className = 'rbp-cell rbp-cell-vehicle';
-        const sw = document.createElement('span');
-        sw.className = 'rbp-swatch';
-        sw.style.background = colors[idx % colors.length];
-        vcell.appendChild(sw);
-        const vname = document.createElement('span');
-        vname.textContent = vr.vehicle_name || `Vehicle ${vehicleId}`;
-        vcell.appendChild(vname);
-        row.appendChild(vcell);
-
-        // Get end_point for accurate cumulative values
-        const endPoint = vr.end_point || (vr.waypoints && vr.waypoints.length > 0 ? vr.waypoints[vr.waypoints.length - 1] : null);
-
-        // 3) Dist
-        const dcell = document.createElement('div');
-        dcell.className = 'rbp-cell rbp-cell-dist';
-        // Use end_point's cumulative_distance for accuracy (more precise than total_distance)
         let distText = '-';
-        if (endPoint && endPoint.cumulative_distance != null && !isNaN(Number(endPoint.cumulative_distance))) {
+        if (endPoint && endPoint.cumulative_distance != null) {
             const km = Number(endPoint.cumulative_distance) / 1000.0;
             distText = `${km.toFixed(2)}km`;
-        } else if (vr.total_distance != null && !isNaN(Number(vr.total_distance))) {
-            const km = Number(vr.total_distance) / 1000.0;
+        } else if (vehicleRoute.total_distance != null) {
+            const km = Number(vehicleRoute.total_distance) / 1000.0;
             distText = `${km.toFixed(1)}km`;
-        } else if (vr.total_distance && typeof vr.total_distance === 'string' && vr.total_distance.includes('km')) {
-            distText = vr.total_distance;
-        } else if (vr.dist) {
-            distText = vr.dist;
         }
-        dcell.textContent = distText;
-        row.appendChild(dcell);
-
-        // 4) Time
-        const tcell = document.createElement('div');
-        tcell.className = 'rbp-cell rbp-cell-time';
-        // Use end_point's cumulative_time for accuracy (more precise than total_time)
+        
         let timeText = '-';
         const endPointTime = endPoint ? endPoint.cumulative_time : null;
-        if (endPointTime != null && !isNaN(Number(endPointTime))) {
-            const secs = Number(endPointTime);
-            const totalSeconds = secs;
-            const minutes = Math.floor(totalSeconds / 60);
-            const seconds = Math.floor(totalSeconds % 60);
-            timeText = `${String(minutes).padStart(2,'0')}분 ${String(seconds).padStart(2,'0')}초`;
-        } else if (vr.total_time != null && !isNaN(Number(vr.total_time))) {
-            const secs = Number(vr.total_time);
-            const totalSeconds = secs;
-            const minutes = Math.floor(totalSeconds / 60);
-            const seconds = Math.floor(totalSeconds % 60);
-            timeText = `${String(minutes).padStart(2,'0')}분 ${String(seconds).padStart(2,'0')}초`;
-        } else if (vr.total_time && typeof vr.total_time === 'string' && vr.total_time.includes('min')) {
-            timeText = vr.total_time;
-        } else if (vr.time) {
-            timeText = vr.time;
+        if (endPointTime != null) {
+            const minutes = Math.floor(endPointTime / 60);
+            timeText = `${minutes}분`;
+        } else if (vehicleRoute.total_time != null) {
+            const minutes = Math.floor(vehicleRoute.total_time / 60);
+            timeText = `${minutes}분`;
         }
-        tcell.textContent = timeText;
-        row.appendChild(tcell);
-
-        // 5) Load
-        const lcell = document.createElement('div');
-        lcell.className = 'rbp-cell rbp-cell-load';
-        // prefer route_load, fallback to load
-        let loadText = '-';
-        if (vr.route_load != null) {
-            loadText = String(vr.route_load);
-        } else if (vr.load != null) {
-            loadText = String(vr.load);
-        } else if (vr.load_description) {
-            loadText = String(vr.load_description);
-        }
-        lcell.textContent = loadText;
-        row.appendChild(lcell);
-
-        // 6) Timeline cell (fills remaining space)
-        const timelineCell = document.createElement('div');
-        timelineCell.className = 'rbp-cell rbp-cell-timeline';
-        const timelineOuter = document.createElement('div');
-        timelineOuter.className = 'rbp-timeline';
         
-        // Calculate total time for this vehicle (use end_point cumulative time if available, otherwise total_time)
-        const totalTime = (endPoint && endPoint.cumulative_time) ? endPoint.cumulative_time : (vr.total_time || 0);
+        let loadText = vehicleRoute.route_load != null ? String(vehicleRoute.route_load) : '-';
         
-        // Add background bar
-        const bar = document.createElement('div');
-        bar.className = 'rbp-bar';
-        bar.style.background = colors[idx % colors.length];
-        bar.style.width = `${(totalTime / maxTime) * 100}%`;
-        timelineOuter.appendChild(bar);
+        // Extract vehicle number from vehicleId (e.g., "vehicle_1" -> "1")
+        const vehicleNumber = String(vehicleId).replace(/[^0-9]/g, '') || groupIndex + 1;
         
-        // Add stop markers along the timeline
-        if (vr.waypoints && Array.isArray(vr.waypoints)) {
-            addStopMarkers(timelineOuter, vr.waypoints, maxTime, colors[idx % colors.length]);
-        }
-
-        // Add 15-minute vertical grid ticks (no text) -> 15 minutes = 900 seconds
-        (function addGridTicks(timelineEl, totalSeconds) {
-            try {
-                const intervalSec = 10 * 60; // 600 seconds
-                if (!timelineEl || !totalSeconds || totalSeconds <= 0) return;
-                // Remove existing ticks if any
-                const existing = timelineEl.querySelectorAll('.rbp-grid-tick');
-                existing.forEach(n => n.remove());
-
-                // Create ticks across 0..totalSeconds inclusive
-                let tickIndex = 0;
-                for (let t = intervalSec; t < totalSeconds; t += intervalSec) {
-                    tickIndex += 1;
-                    const leftPercent = (t / totalSeconds) * 100;
-                    const tick = document.createElement('div');
-                    tick.className = 'rbp-grid-tick';
-                    // every 6th 10-min tick = 60 minutes -> mark as hour tick
-                    if (tickIndex % 6 === 0) {
-                        tick.classList.add('rbp-grid-tick-hour');
-                    }
-                    tick.style.left = `${leftPercent}%`;
-                    timelineEl.appendChild(tick);
-                }
-            } catch (e) {
-                // non-fatal
-                console.warn('Grid ticks render error:', e);
-            }
-        })(timelineOuter, maxTime);
+        // Add to timeline groups (hidden labels)
+        timelineGroups.add({
+            id: vehicleId,
+            content: '',  // Empty content (we'll use custom table)
+            style: `background-color: ${color}10; border-left: 3px solid ${color};`
+        });
         
-        timelineCell.appendChild(timelineOuter);
-        row.appendChild(timelineCell);
+        // Add to custom left table
+        addTableRow(vehicleId, vehicleNumber, color, distText, timeText, loadText);
 
-        rowsContainer.appendChild(row);
-        idx += 1;
-    });
-}
-
-/**
- * Calculate appropriate time interval for timeline ticks based on max time
- */
-function calculateTimeInterval(maxTimeSeconds) {
-    // Choose interval based on total time duration
-    if (maxTimeSeconds <= 600) return 60; // 1 min for <= 10 min
-    if (maxTimeSeconds <= 1800) return 300; // 5 min for <= 30 min
-    if (maxTimeSeconds <= 3600) return 600; // 10 min for <= 1 hour
-    if (maxTimeSeconds <= 7200) return 900; // 15 min for <= 2 hours
-    return 1800; // 30 min for longer durations
-}
-
-/**
- * Format time in seconds to display label (e.g., "15분", "1시간")
- */
-function formatTimeLabel(seconds) {
-    const hours = Math.floor(seconds / 3600);
-    const mins = Math.floor((seconds % 3600) / 60);
-    const secs = Math.floor(seconds % 60);
-    
-    if (hours > 0) {
-        if (mins > 0) {
-            return `${hours}시간 ${mins}분`;
-        }
-        return `${hours}시간`;
-    }
-    if (mins > 0) {
-        return `${mins}분`;
-    }
-    return `${secs}초`;
-}
-
-/**
- * Format seconds to MM분 SS초 (zero-padded minutes and seconds)
- */
-function formatTimeMMSS(seconds) {
-    const totalSec = Math.max(0, Math.floor(Number(seconds) || 0));
-    const mins = Math.floor(totalSec / 60);
-    const secs = totalSec % 60;
-    return `${String(mins).padStart(2,'0')}분 ${String(secs).padStart(2,'0')}초`;
-}
-
-/**
- * Add stop markers to timeline based on cumulative_time of each waypoint
- */
-function addStopMarkers(timelineContainer, waypoints, maxTime, vehicleColor) {
-    waypoints.forEach((waypoint, index) => {
-        const isDepot = waypoint.type === 'depot';
-        
-        // Get cumulative time - if not available, estimate based on position
-        let cumulativeTime = 0;
-        if (waypoint.cumulative_time != null) {
-            cumulativeTime = waypoint.cumulative_time;
-        } else if (waypoint.cumulative_distance != null && waypoint.total_distance) {
-            // Estimate time based on distance proportion
-            const distProportion = waypoint.cumulative_distance / waypoint.total_distance;
-            cumulativeTime = distProportion * maxTime;
-        } else {
-            // Fallback: distribute evenly
-            cumulativeTime = (index / (waypoints.length - 1)) * maxTime;
-        }
+        // Add single range bar to show vehicle's total travel time (visualization only)
+        if (vehicleRoute.waypoints && Array.isArray(vehicleRoute.waypoints) && vehicleRoute.waypoints.length > 1) {
+            const startDate = new Date(2025, 0, 1, 9, 0, 0); // Start at 9:00 AM
             
-            // Create marker element
-            const marker = document.createElement('div');
-            marker.className = 'rbp-stop-marker';
-            if (isDepot) marker.classList.add('depot-marker');
+            const firstWaypoint = vehicleRoute.waypoints[0];
+            const lastWaypoint = vehicleRoute.waypoints[vehicleRoute.waypoints.length - 1];
+            
+            const startTime = firstWaypoint.cumulative_time || 0;
+            const endTime = lastWaypoint.cumulative_time || 0;
+            
+            const rangeStart = new Date(startDate.getTime() + startTime * 1000);
+            const rangeEnd = new Date(startDate.getTime() + endTime * 1000);
 
-            // Set visual label: start(S), middle numbers, end(G)
-            let label = '';
-            if (index === 0) {
-                label = 'S';
-            } else if (index === waypoints.length - 1) {
-                label = 'G';
-            } else {
-                label = String(index);
-            }
-            marker.textContent = label;
-
-            marker.style.left = `${(cumulativeTime / maxTime) * 100}%`;
-            marker.style.borderColor = vehicleColor;
-
-            // Add tooltip with stop info: name, demand, time (MM분 SS초), distance (00.00km)
-            const nameText = waypoint.name || `정류장 ${index + 1}`;
-            const demandText = (waypoint.demand != null) ? String(waypoint.demand) : '-';
-            const timeText = formatTimeMMSS(cumulativeTime);
-            let distanceText = '-';
-            if (waypoint.cumulative_distance != null && !isNaN(Number(waypoint.cumulative_distance))) {
-                distanceText = `${(Number(waypoint.cumulative_distance) / 1000).toFixed(2)}km`;
-            } else if (waypoint.cumulative_distance && typeof waypoint.cumulative_distance === 'string' && waypoint.cumulative_distance.includes('km')) {
-                distanceText = waypoint.cumulative_distance;
-            }
-            marker.title = `${nameText}\n수요량: ${demandText}\n시간: ${timeText}\n거리: ${distanceText}`;
-        
-        // Add click event to toggle tooltip and highlight on map
-        marker.addEventListener('click', (ev) => {
-            ev.stopPropagation(); // prevent document click handler from immediately closing
-            // Close any other open tooltips
-            document.querySelectorAll('.rbp-stop-marker.show-tooltip').forEach(el => {
-                if (el !== marker) el.classList.remove('show-tooltip');
+            // Add single range item for vehicle journey visualization
+            timelineItems.add({
+                id: `${vehicleId}_journey`,
+                group: vehicleId,
+                content: '',  // No label
+                start: rangeStart,
+                end: rangeEnd,
+                type: 'range',
+                className: 'vehicle-journey',
+                style: `background-color: ${color}; border-color: ${color}; border-width: 2px;`,  // Solid color matching border
+                editable: false  // Not editable
             });
-            // Toggle this marker's tooltip
-            marker.classList.toggle('show-tooltip');
-            console.log('Stop marker clicked (tooltip toggled):', waypoint);
-            // TODO: Highlight this stop on the map
-        });
+        }
         
-        timelineContainer.appendChild(marker);
+        // Add circular markers for each waypoint's arrival_time
+        // Only include via_points / waypoints. Do NOT include start_point or end_point to avoid duplicates.
+        const allWaypoints = [];
+
+        if (vehicleRoute.waypoints && Array.isArray(vehicleRoute.waypoints)) {
+            vehicleRoute.waypoints.forEach((wp, idx) => {
+                allWaypoints.push({ ...wp, wpIndex: idx });
+            });
+        } else if (vehicleRoute.via_points && Array.isArray(vehicleRoute.via_points)) {
+            vehicleRoute.via_points.forEach((wp, idx) => {
+                allWaypoints.push({ ...wp, wpIndex: idx });
+            });
+        }
+        
+        // Create point markers for each waypoint
+        allWaypoints.forEach((waypoint) => {
+            if (!waypoint.arrival_time) return;
+            
+            try {
+                // Parse arrival_time and extract time only (HH:MM:SS)
+                // Format: "2025-10-17T09:00:00"
+                const arrivalTimeStr = waypoint.arrival_time;
+                let timeMatch;
+                
+                // Extract time from ISO format or time-only format
+                if (arrivalTimeStr.includes('T')) {
+                    // ISO format: "2025-10-17T09:22:17"
+                    timeMatch = arrivalTimeStr.split('T')[1];
+                } else if (arrivalTimeStr.includes(' ')) {
+                    // Space separated: "2025-10-17 09:22:17"
+                    timeMatch = arrivalTimeStr.split(' ')[1];
+                } else {
+                    // Assume it's already time only: "09:22:17"
+                    timeMatch = arrivalTimeStr;
+                }
+                
+                // Parse HH:MM:SS or HH:MM:SS.ffffff
+                const timeParts = timeMatch.split(':');
+                const hours = parseInt(timeParts[0], 10);
+                const minutes = parseInt(timeParts[1], 10);
+                const secondsParts = timeParts[2] ? timeParts[2].split('.') : ['0'];
+                const seconds = parseInt(secondsParts[0], 10);
+                
+                // Create date with base date (2025-01-01) and parsed time
+                const baseDate = new Date(2025, 0, 1); // January 1, 2025
+                const arrivalDate = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate(), hours, minutes, seconds);
+                
+                const isDepot = waypoint.type === 'depot' || waypoint.name?.includes('Depot') || waypoint.name?.includes('depot');
+                const isStartEnd = waypoint.isStart || waypoint.isEnd;
+                const isEditable = !isDepot && !isStartEnd;
+                
+                // Create tooltip with arrival_time string
+                const tooltipContent = createTooltipContent(waypoint, waypoint.arrival_time);
+                
+                // Create point marker item
+                timelineItems.add({
+                    id: `${vehicleId}_marker_${waypoint.wpIndex}`,
+                    group: vehicleId,
+                    content: '', // No label needed, just the marker
+                    start: arrivalDate,
+                    type: 'point',
+                    // Use unified class for all point markers, add readonly class if not editable
+                    className: isEditable ? 'unified-waypoint' : 'unified-waypoint vis-readonly',
+                    // Apply vehicle color directly to border (currentColor won't work, needs explicit color)
+                    style: `border-color: ${color};`,
+                    title: tooltipContent,
+                    // Only allow dragging for non-depot waypoints
+                    editable: {
+                        updateTime: isEditable,  // Can drag horizontally (time) if not depot/start/end
+                        updateGroup: isEditable, // Can drag between vehicles if not depot/start/end
+                        remove: false
+                    },
+                    originalData: {
+                        vehicleId: vehicleId,
+                        waypointIndex: waypoint.wpIndex,
+                        waypoint: waypoint,
+                        isDepot: isDepot,
+                        isStartEnd: isStartEnd
+                    }
+                });
+            } catch (error) {
+                console.warn(`⚠️ Failed to parse arrival_time for waypoint:`, waypoint.arrival_time, error);
+            }
+        });
+
+        groupIndex++;
     });
 
-    // Close tooltips when clicking outside any marker
-    if (!document._rbp_tooltip_click_listener_installed) {
-        document.addEventListener('click', (ev) => {
-            document.querySelectorAll('.rbp-stop-marker.show-tooltip').forEach(el => el.classList.remove('show-tooltip'));
-        });
-        document._rbp_tooltip_click_listener_installed = true;
+    // Fit timeline to show all items
+    setTimeout(() => {
+        timelineInstance.fit();
+    }, 100);
+    
+    console.log('✅ Timeline rendered with', timelineGroups.length, 'vehicles and', timelineItems.length, 'stops');
+}
+
+/* Create tooltip content for waypoint */
+function createTooltipContent(waypoint, arrivalTimeStr) {
+    // Parse arrival_time string to extract time
+    let hours = 0, minutes = 0, seconds = 0;
+    
+    if (arrivalTimeStr) {
+        let timeMatch;
+        
+        // Extract time from ISO format or time-only format
+        if (arrivalTimeStr.includes('T')) {
+            // ISO format: "2025-10-17T09:22:17"
+            timeMatch = arrivalTimeStr.split('T')[1];
+        } else if (arrivalTimeStr.includes(' ')) {
+            // Space separated: "2025-10-17 09:22:17"
+            timeMatch = arrivalTimeStr.split(' ')[1];
+        } else {
+            // Assume it's already time only: "09:22:17"
+            timeMatch = arrivalTimeStr;
+        }
+        
+        // Parse HH:MM:SS or HH:MM:SS.ffffff
+        const timeParts = timeMatch.split(':');
+        hours = parseInt(timeParts[0], 10);
+        minutes = parseInt(timeParts[1], 10);
+        const secondsParts = timeParts[2] ? timeParts[2].split('.') : ['0'];
+        seconds = parseInt(secondsParts[0], 10);
+    }
+    
+    let tooltip = `<strong>${waypoint.name || 'Stop'}</strong>\n`;
+    tooltip += `Arrival: ${String(hours).padStart(2,'0')}:${String(minutes).padStart(2,'0')}:${String(seconds).padStart(2,'0')}\n`;
+    
+    if (waypoint.demand) {
+        tooltip += `Demand: ${waypoint.demand}\n`;
+    }
+    
+    if (waypoint.cumulative_distance) {
+        const km = (waypoint.cumulative_distance / 1000).toFixed(2);
+        tooltip += `Distance: ${km}km\n`;
+    }
+    
+    if (waypoint.address) {
+        tooltip += `Address: ${waypoint.address}`;
+    }
+    
+    return tooltip;
+}
+
+/* Handle timeline changes (drag & drop) */
+function onTimelineChanged() {
+    console.log('📊 Timeline changed - items moved');
+    // Timeline 변경 시 Reload 버튼을 사용하여 처리
+    // 순서는 CSV 저장 후 Reload에서 처리됨
+}
+
+/* Handle waypoint group change (drag between vehicles) */
+function handleWaypointGroupChange(itemId, fromVehicleId, toVehicleId) {
+    console.log('🔄 Waypoint group change:', itemId, 'from', fromVehicleId, 'to', toVehicleId);
+    
+    const item = timelineItems.get(itemId);
+    if (!item || !item.originalData) {
+        console.warn('⚠️ No original data found for item:', itemId);
+        return;
+    }
+    
+    const { vehicleId: oldVehicleId, waypointIndex, waypoint } = item.originalData;
+    
+    // Update the waypoint in vehicleRoutesData
+    if (!vehicleRoutesData[oldVehicleId] || !vehicleRoutesData[toVehicleId]) {
+        console.warn('⚠️ Vehicle data not found');
+        return;
+    }
+    
+    // Remove waypoint from old vehicle
+    const oldWaypoints = vehicleRoutesData[oldVehicleId].waypoints || [];
+    const waypointToMove = oldWaypoints[waypointIndex];
+    
+    if (!waypointToMove) {
+        console.warn('⚠️ Waypoint not found at index:', waypointIndex);
+        return;
+    }
+    
+    oldWaypoints.splice(waypointIndex, 1);
+    
+    // Add waypoint to new vehicle
+    const newWaypoints = vehicleRoutesData[toVehicleId].waypoints || [];
+    newWaypoints.push(waypointToMove);
+    
+    // Log change (no popup notification)
+    console.log(`✅ ${waypoint.name || 'Waypoint'} moved from Vehicle ${oldVehicleId} to Vehicle ${toVehicleId}`);
+    
+    // Recalculate and re-render timeline
+    recalculateRoutes();
+}
+
+/* Handle waypoint time change (drag horizontally) */
+function handleWaypointTimeChange(itemId, newTime) {
+    console.log('⏰ Waypoint time change:', itemId, 'to', newTime);
+    
+    const item = timelineItems.get(itemId);
+    if (!item || !item.originalData) {
+        console.warn('⚠️ No original data found for item:', itemId);
+        return;
+    }
+    
+    const { vehicleId, waypointIndex, waypoint } = item.originalData;
+    
+    // Update the waypoint's arrival time
+    if (!vehicleRoutesData[vehicleId]) {
+        console.warn('⚠️ Vehicle data not found');
+        return;
+    }
+    
+    const waypoints = vehicleRoutesData[vehicleId].waypoints || [];
+    const targetWaypoint = waypoints[waypointIndex];
+    
+    if (!targetWaypoint) {
+        console.warn('⚠️ Waypoint not found at index:', waypointIndex);
+        return;
+    }
+    
+    // Format new time
+    const hours = String(newTime.getHours()).padStart(2, '0');
+    const minutes = String(newTime.getMinutes()).padStart(2, '0');
+    const seconds = String(newTime.getSeconds()).padStart(2, '0');
+    const newTimeStr = `2025-01-01T${hours}:${minutes}:${seconds}`;
+    
+    targetWaypoint.arrival_time = newTimeStr;
+    
+    showNotification(`${waypoint.name || 'Waypoint'} time updated to ${hours}:${minutes}`, 'info');
+    
+    // Recalculate cumulative times
+    recalculateCumulativeTimes(vehicleId);
+}
+
+/* Recalculate cumulative times for a vehicle */
+function recalculateCumulativeTimes(vehicleId) {
+    const vehicleData = vehicleRoutesData[vehicleId];
+    if (!vehicleData || !vehicleData.waypoints) return;
+    
+    let cumulativeTime = 0;
+    const baseDate = new Date(2025, 0, 1, 9, 0, 0); // 9:00 AM base
+    
+    vehicleData.waypoints.forEach((waypoint, index) => {
+        if (waypoint.arrival_time) {
+            const arrivalDate = new Date(waypoint.arrival_time);
+            const timeDiff = (arrivalDate - baseDate) / 1000; // seconds
+            waypoint.cumulative_time = timeDiff;
+            cumulativeTime = timeDiff;
+        }
+    });
+    
+    console.log('✅ Recalculated cumulative times for', vehicleId);
+}
+
+/* Recalculate all routes after changes */
+function recalculateRoutes() {
+    console.log('🔄 Recalculating routes...');
+    
+    // Re-render the timeline with updated data
+    if (typeof renderBottomRoutePanel === 'function') {
+        renderBottomRoutePanel(vehicleRoutesData);
+    }
+    
+    // Update the map if needed
+    if (typeof window.displayAndManageRoutes === 'function' && window.map) {
+        window.displayAndManageRoutes(vehicleRoutesData, window.map);
     }
 }
 
-// Initialize collapse/expand toggle for bottom panel
+/* Show notification to user */
+function showNotification(message, type = 'info') {
+    console.log(`📢 [${type.toUpperCase()}] ${message}`);
+    
+    const colorMap = {
+        'info': '#17a2b8',
+        'success': '#28a745',
+        'error': '#dc3545',
+        'warning': '#ffc107'
+    };
+    
+    // Create notification element
+    const notification = document.createElement('div');
+    notification.className = `notification notification-${type}`;
+    notification.textContent = message;
+    notification.style.cssText = `
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        padding: 12px 20px;
+        background-color: ${colorMap[type] || colorMap['info']};
+        color: white;
+        border-radius: 4px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+        z-index: 10000;
+        animation: slideIn 0.3s ease-out;
+        max-width: 400px;
+    `;
+    
+    document.body.appendChild(notification);
+    
+    // Remove after 3 seconds
+    setTimeout(() => {
+        notification.style.animation = 'slideOut 0.3s ease-out';
+        setTimeout(() => {
+            if (notification.parentNode) {
+                document.body.removeChild(notification);
+            }
+        }, 300);
+    }, 3000);
+}
+
+// Add notification animations
+if (!document.getElementById('notification-animations')) {
+    const style = document.createElement('style');
+    style.id = 'notification-animations';
+    style.textContent = `
+        @keyframes slideIn {
+            from {
+                transform: translateX(400px);
+                opacity: 0;
+            }
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+        @keyframes slideOut {
+            from {
+                transform: translateX(0);
+                opacity: 1;
+            }
+            to {
+                transform: translateX(400px);
+                opacity: 0;
+            }
+        }
+        .timeline-btn-save {
+            background-color: #28a745 !important;
+            color: white !important;
+            font-weight: bold !important;
+            animation: pulse 2s infinite;
+        }
+        .timeline-btn-save:hover {
+            background-color: #218838 !important;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+    `;
+    document.head.appendChild(style);
+}
+
+/* Mark timeline as having unsaved changes */
+function markAsUnsaved() {
+    hasUnsavedChanges = true;
+    const saveBtn = document.getElementById('timeline-save-changes');
+    const indicator = document.getElementById('timeline-changes-indicator');
+    
+    if (saveBtn) {
+        saveBtn.style.display = 'inline-block';
+    }
+    if (indicator) {
+        indicator.style.display = 'inline';
+        indicator.title = 'Unsaved changes';
+    }
+}
+
+/* Mark timeline as saved */
+function markAsSaved() {
+    hasUnsavedChanges = false;
+    const saveBtn = document.getElementById('timeline-save-changes');
+    const indicator = document.getElementById('timeline-changes-indicator');
+    
+    if (saveBtn) {
+        saveBtn.style.display = 'none';
+    }
+    if (indicator) {
+        indicator.style.display = 'none';
+    }
+}
+
+/* Save timeline changes to server */
+async function saveTimelineChanges() {
+    if (!hasUnsavedChanges) {
+        showNotification('No changes to save', 'info');
+        return;
+    }
+    
+    await saveTimelineChangesImmediate();
+}
+
+/* Save timeline changes immediately (without checking hasUnsavedChanges) */
+async function saveTimelineChangesImmediate() {
+    console.log('💾 Saving timeline changes immediately...');
+    console.log('📊 Current vehicleRoutesData:', vehicleRoutesData);
+    
+    try {
+        // Convert vehicleRoutesData to the format expected by the server
+        const routesToSave = {};
+        
+        Object.entries(vehicleRoutesData).forEach(([vehicleId, vehicleData]) => {
+            routesToSave[vehicleId] = {
+                ...vehicleData,
+                waypoints: vehicleData.waypoints || [],
+                vehicle_id: vehicleId
+            };
+        });
+        
+        console.log('📤 Sending to server:', routesToSave);
+        
+        // Build URL with project and edit parameters
+        const params = new URLSearchParams();
+        const query = resolveProjectQuery();
+        if (query) {
+            const existing = new URLSearchParams(query.startsWith('?') ? query.slice(1) : query);
+            existing.forEach((value, key) => params.set(key, value));
+        }
+        if (window.currentEditId) {
+            params.set('editId', window.currentEditId);
+        }
+        
+        const url = `/api/save-timeline-changes?${params.toString()}`;
+        console.log('🌐 POST URL:', url);
+        
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                routes: routesToSave
+            })
+        });
+        
+        console.log('📥 Response status:', response.status);
+        
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error('❌ Server error:', errorText);
+            throw new Error('Failed to save changes: ' + errorText);
+        }
+        
+        const data = await response.json();
+        console.log('📥 Response data:', data);
+        
+        if (data.success) {
+            // 성공 시 콘솔 로그만 출력 (팝업 알림 제거)
+            console.log(`✅ Timeline changes saved: ${data.updated_count || 0} waypoints updated, ${data.vehicle_changes || 0} vehicle changes, ${data.order_changes || 0} order changes`);
+        } else {
+            throw new Error(data.error || 'Unknown error');
+        }
+    } catch (error) {
+        console.error('❌ Failed to save timeline changes:', error);
+        // 에러 시에만 알림 표시
+        showNotification('⚠️ Save failed: ' + error.message, 'error');
+    }
+}
 
 })();
 
@@ -905,37 +1670,7 @@ function addStopMarkers(timelineContainer, waypoints, maxTime, vehicleColor) {
         return data;
     }
     
-    /**
-     * resolveProjectQuery 함수 (route-editor.js에서 가져옴)
-     */
-    function resolveProjectQuery() {
-        if (window.location && window.location.search && window.location.search.length > 1) {
-            return window.location.search;
-        }
-        try {
-            if (window.opener && window.opener.location && window.opener.location.search && window.opener.location.search.length > 1) {
-                return window.opener.location.search;
-            }
-        } catch (e) {
-            // cross-origin block
-        }
-        try {
-            if (window.currentProjectId) {
-                return '?projectId=' + encodeURIComponent(window.currentProjectId);
-            }
-        } catch (e) {
-            // ignore
-        }
-        try {
-            const match = document.cookie.match(/(?:^|; )projectId=([^;]+)/);
-            if (match && match[1]) {
-                return '?projectId=' + encodeURIComponent(match[1]);
-            }
-        } catch (e) {
-            // ignore
-        }
-        return '';
-    }
+    // Use the top-level resolveProjectQuery (exposed to window) to avoid duplication
     
     /**
      * 임시 메시지 표시 (3초 후 자동 사라짐)

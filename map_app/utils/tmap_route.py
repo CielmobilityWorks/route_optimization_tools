@@ -494,3 +494,138 @@ class TmapRoute:
             'features': features,
             'properties': properties
         }
+
+
+def get_route_with_order(ordered_locations: List[Dict]) -> Optional[Dict]:
+    """
+    순서가 정해진 locations를 받아서 TMAP API로 경로를 계산합니다.
+    
+    Args:
+        ordered_locations: 순서대로 정렬된 location 리스트
+                          각 location은 {'name', 'lat', 'lng', 'demand', 'type'} 형식
+    
+    Returns:
+        경로 정보를 포함한 딕셔너리 또는 None
+        {
+            'waypoints': [...],  # cumulative_distance, cumulative_time 포함
+            'total_distance': float,
+            'total_time': float,
+            'geometry': {...}
+        }
+    """
+    try:
+        if len(ordered_locations) < 2:
+            print("⚠️ 최소 2개의 location이 필요합니다")
+            return None
+        
+        tmap_route = TmapRoute()
+        
+        # 시작점과 종료점 설정
+        start_loc = ordered_locations[0]
+        end_loc = ordered_locations[-1]
+        
+        start_point = {
+            'name': start_loc['name'],
+            'x': start_loc['lng'],
+            'y': start_loc['lat']
+        }
+        
+        end_point = {
+            'name': end_loc['name'],
+            'x': end_loc['lng'],
+            'y': end_loc['lat']
+        }
+        
+        # 중간 경유지 (시작과 끝 제외)
+        via_points = []
+        for i, loc in enumerate(ordered_locations[1:-1], 1):
+            via_points.append({
+                'id': f'via_{i}',
+                'name': loc['name'],
+                'x': loc['lng'],
+                'y': loc['lat']
+            })
+        
+        # TMAP API 호출
+        print(f"🗺️ TMAP API 호출: {start_point['name']} -> ... -> {end_point['name']} (경유지 {len(via_points)}개)")
+        
+        route_result = tmap_route.get_route(
+            start_point=start_point,
+            end_point=end_point,
+            via_points=via_points,
+            searchOption="0",  # 추천 경로
+            carType="3",       # 승용차
+            viaTime="60"       # 경유지당 1분
+        )
+        
+        if not route_result:
+            print("❌ TMAP API 응답 없음")
+            return None
+        
+        # 응답 파싱
+        features = route_result.get('features', [])
+        properties = route_result.get('properties', {})
+        
+        total_distance = properties.get('totalDistance', 0)
+        total_time = properties.get('totalTime', 0)
+        
+        # Waypoints 생성 (cumulative 값 계산)
+        waypoints = []
+        cumulative_distance = 0
+        cumulative_time = 0
+        
+        for i, loc in enumerate(ordered_locations):
+            # 각 구간의 거리와 시간 추출 (feature에서)
+            segment_distance = 0
+            segment_time = 0
+            
+            if i > 0 and i <= len(features):
+                # 이전 waypoint에서 현재까지의 구간
+                feature = features[i-1] if i-1 < len(features) else {}
+                if isinstance(feature, dict):
+                    feat_props = feature.get('properties', {})
+                    segment_distance = feat_props.get('distance', 0) or feat_props.get('totalDistance', 0)
+                    segment_time = feat_props.get('time', 0) or feat_props.get('totalTime', 0)
+            
+            cumulative_distance += segment_distance
+            cumulative_time += segment_time
+            
+            waypoint = {
+                'name': loc['name'],
+                'location': [loc['lng'], loc['lat']],
+                'type': loc.get('type', 'customer'),
+                'demand': loc.get('demand', 0),
+                'cumulative_distance': cumulative_distance,
+                'cumulative_time': cumulative_time,
+                'segment_distance': segment_distance,
+                'segment_time': segment_time
+            }
+            
+            waypoints.append(waypoint)
+        
+        # 마지막 waypoint의 cumulative 값으로 total 값 조정
+        if waypoints:
+            last_wp = waypoints[-1]
+            if total_distance == 0:
+                total_distance = last_wp['cumulative_distance']
+            if total_time == 0:
+                total_time = last_wp['cumulative_time']
+        
+        result = {
+            'waypoints': waypoints,
+            'total_distance': total_distance,
+            'total_time': total_time,
+            'geometry': {
+                'type': 'FeatureCollection',
+                'features': features
+            }
+        }
+        
+        print(f"✅ 경로 계산 완료: {total_distance}m, {total_time}s")
+        return result
+        
+    except Exception as e:
+        print(f"❌ get_route_with_order 오류: {e}")
+        import traceback
+        traceback.print_exc()
+        return None

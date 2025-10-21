@@ -200,9 +200,17 @@ function updateRouteInfoTable(vehicleRoutes) {
     tbody.innerHTML = '';
     
     const colors = window.ROUTE_COLORS || ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8', '#F7DC6F'];
+    
+    // Sort vehicle routes by vehicle_id for consistent color assignment
+    const sortedVehicleRoutes = Object.values(vehicleRoutes).sort((a, b) => {
+        const idA = a.vehicle_id || '';
+        const idB = b.vehicle_id || '';
+        return String(idA).localeCompare(String(idB));
+    });
+    
     let routeIndex = 0;
     
-    Object.values(vehicleRoutes).forEach((vehicleRoute) => {
+    sortedVehicleRoutes.forEach((vehicleRoute) => {
         const vehicleId = vehicleRoute.vehicle_id;
         const color = colors[routeIndex % colors.length];
         
@@ -390,9 +398,16 @@ function displayAndManageRoutes(vehicleRoutes, mapInstance) {
     const colors = window.ROUTE_COLORS || ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8', '#F7DC6F'];
     const vehicleVisibility = {}; // 각 차량의 표시 상태 관리
     
+    // Sort vehicle routes by vehicle_id for consistent color assignment
+    const sortedVehicleRoutes = Object.values(vehicleRoutes).sort((a, b) => {
+        const idA = a.vehicle_id || '';
+        const idB = b.vehicle_id || '';
+        return String(idA).localeCompare(String(idB));
+    });
+    
     let routeIndex = 0;
     
-    Object.values(vehicleRoutes).forEach((vehicleRoute) => {
+    sortedVehicleRoutes.forEach((vehicleRoute) => {
         const color = colors[routeIndex % colors.length];
         const vehicleId = vehicleRoute.vehicle_id;
         vehicleVisibility[vehicleId] = true; // 초기에는 모든 경로 표시

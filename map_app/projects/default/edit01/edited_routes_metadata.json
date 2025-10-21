@@ -1,6 +1,11 @@
 {
-  "vehicle_hashes": {},
-  "last_updated": null,
-  "created_at": "2025-10-16T11:45:42.289220",
-  "description": "Initial edit scenario created from optimization results"
+  "vehicle_hashes": {
+    "1": "d0d891476664808d37eebf648277909f",
+    "2": "706c26089cc459be6fbabdf4d131cfa5",
+    "3": "be302f4800c60c6c95749bbb4077b3da",
+    "4": "807d90d63d5fcc6a65f31c63780b07ef",
+    "5": "afb06a411b19b1ed54dc3253f7bd6c64",
+    "6": "973153c241cb4b844d503b149c2dc91e"
+  },
+  "last_updated": "2025-10-21T19:01:35.474185"
 }

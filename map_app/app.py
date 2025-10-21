@@ -1,4 +1,4 @@
-from flask import Flask, render_template, jsonify, request, make_response, send_from_directory
+from flask import Flask, render_template, jsonify, request, make_response, send_from_directory, send_file
 import pandas as pd
 import numpy as np
 import os
@@ -248,17 +248,63 @@ def create_edit():
             if os.path.exists(gen_json):
                 shutil.copy2(gen_json, project_path('edited_routes.json', pid, edit_id))
             
-            # 초기 메타데이터 생성 (빈 해시로 시작하여 첫 reload에서 모든 차량을 재생성하도록)
+            # ✅ 초기 메타데이터 생성: CSV에서 바로 해시 계산
             metadata_path = project_path('edited_routes_metadata.json', pid, edit_id)
+            initial_hashes = {}
+            
+            # CSV에서 해시 미리 계산
+            edited_csv_path = project_path('edited_routes.csv', pid, edit_id)
+            if os.path.exists(edited_csv_path):
+                try:
+                    import hashlib
+                    routes_df = pd.read_csv(edited_csv_path, encoding='utf-8-sig')
+                    routes_df['Vehicle_ID'] = pd.to_numeric(routes_df['Vehicle_ID'], errors='coerce')
+                    routes_df['Stop_Order'] = pd.to_numeric(routes_df['Stop_Order'], errors='coerce')
+                    routes_df = routes_df.dropna(subset=['Vehicle_ID', 'Stop_Order'])
+                    
+                    # 차량별 해시 계산 (regenerate_edited_routes와 동일한 로직)
+                    def compute_vehicle_hash(vehicle_df):
+                        relevant_cols = ['Vehicle_ID', 'Stop_Order', 'Location_ID', 'Location_Name', 
+                                       'Location_Lon', 'Location_Lat', 'Load', 'Location_Type']
+                        available_cols = [col for col in relevant_cols if col in vehicle_df.columns]
+                        sorted_df = vehicle_df[available_cols].sort_values('Stop_Order').copy()
+                        
+                        if 'Location_Lon' in sorted_df.columns:
+                            sorted_df['Location_Lon'] = sorted_df['Location_Lon'].round(6)
+                        if 'Location_Lat' in sorted_df.columns:
+                            sorted_df['Location_Lat'] = sorted_df['Location_Lat'].round(6)
+                        
+                        data_str = sorted_df.to_csv(index=False)
+                        return hashlib.md5(data_str.encode()).hexdigest()
+                    
+                    unique_vehicles = routes_df['Vehicle_ID'].unique()
+                    for vehicle_id in unique_vehicles:
+                        try:
+                            vehicle_id_int = int(vehicle_id)
+                            vehicle_data = routes_df[routes_df['Vehicle_ID'] == vehicle_id_int].copy()
+                            vehicle_hash = compute_vehicle_hash(vehicle_data)
+                            initial_hashes[str(vehicle_id_int)] = vehicle_hash
+                        except Exception as e:
+                            print(f"⚠️ Vehicle {vehicle_id} 해시 계산 실패: {e}")
+                    
+                    print(f"✅ 초기 해시 계산 완료: {len(initial_hashes)}개 차량")
+                except Exception as e:
+                    print(f"⚠️ 초기 해시 계산 중 오류 (빈 해시로 저장): {e}")
+                    initial_hashes = {}
+            
             initial_metadata = {
-                'vehicle_hashes': {},
-                'last_updated': None,
+                'vehicle_hashes': initial_hashes,
+                'last_updated': datetime.now().isoformat() if initial_hashes else None,
                 'created_at': datetime.now().isoformat(),
                 'description': 'Initial edit scenario created from optimization results'
             }
             with open(metadata_path, 'w', encoding='utf-8') as f:
                 json.dump(initial_metadata, f, ensure_ascii=False, indent=2)
-            print(f"✅ 초기 메타데이터 생성: {metadata_path}")
+            
+            if initial_hashes:
+                print(f"✅ 초기 메타데이터 생성 (해시 포함): {metadata_path}")
+            else:
+                print(f"✅ 초기 메타데이터 생성 (빈 해시): {metadata_path}")
         
         return jsonify({'success': True, 'editId': edit_id}), 201
     except Exception as e:
@@ -279,6 +325,154 @@ def delete_edit(edit_id: str):
         
         return jsonify({'success': True, 'message': f'Edit {edit_id} deleted'})
     except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/save-timeline-changes', methods=['POST'])
+def save_timeline_changes():
+    """타임라인에서 드래그&드롭으로 변경된 경유지 순서를 CSV 파일에 저장합니다.
+    
+    프론트엔드에서 전달받은 vehicleRoutesData를 기반으로:
+    1. 각 차량별 waypoints 순서를 파악
+    2. edited_routes.csv의 Stop_Order 컬럼을 업데이트
+    3. CSV 파일 저장
+    """
+    try:
+        data = request.get_json()
+        routes = data.get('routes', {})
+        
+        print(f"\n{'='*60}")
+        print(f"💾 Saving timeline changes...")
+        print(f"📊 Received {len(routes)} vehicles")
+        
+        pid = get_project_id()
+        eid = get_edit_id()
+        
+        print(f"🔍 Project ID: {pid}")
+        print(f"🔍 Edit ID: {eid}")
+        
+        # CSV 파일 경로
+        csv_path = project_path('edited_routes.csv', pid, eid)
+        print(f"📁 CSV path: {csv_path}")
+        
+        if not os.path.exists(csv_path):
+            print(f"❌ CSV file not found: {csv_path}")
+            return jsonify({'success': False, 'error': 'edited_routes.csv not found'}), 404
+        
+        # 기존 CSV 읽기
+        df = pd.read_csv(csv_path)
+        print(f"📊 CSV loaded: {len(df)} rows")
+        print(f"🔍 Columns: {df.columns.tolist()}")
+        
+        # 새로운 순서 정보를 담을 딕셔너리
+        # {(vehicle_id, location_id): new_order}
+        new_order_map = {}
+        
+        # 각 차량별로 순서 매핑 생성
+        for vehicle_id, vehicle_data in routes.items():
+            waypoints = vehicle_data.get('waypoints', [])
+            
+            print(f"\n🚗 Vehicle {vehicle_id}: {len(waypoints)} waypoints")
+            
+            # waypoints 순서대로 Stop_Order 할당 (1부터 시작)
+            for idx, waypoint in enumerate(waypoints, start=1):
+                location_id = waypoint.get('location_id') or waypoint.get('id')
+                location_name = waypoint.get('name', 'Unknown')
+                
+                if location_id:
+                    # Vehicle_ID는 문자열 또는 숫자일 수 있으므로 변환
+                    vid = str(vehicle_id).replace('vehicle_', '')  # 'vehicle_1' -> '1'
+                    try:
+                        vid = int(vid)
+                    except:
+                        pass
+                    
+                    new_order_map[(vid, location_id)] = idx
+                    print(f"  {idx}. {location_name} (ID: {location_id})")
+                else:
+                    print(f"  ⚠️ Waypoint {idx} missing location_id: {waypoint}")
+        
+        print(f"\n📋 Total mappings created: {len(new_order_map)}")
+        
+        # 새로운 접근 방식: (vehicle_id, location_id) 복합 키 사용
+        # 1. (vehicle_id, location_id)별로 새로운 order 매핑 생성
+        vehicle_location_to_order = {}  # {(vehicle_id, location_id): new_order}
+        
+        for vehicle_id, vehicle_data in routes.items():
+            waypoints = vehicle_data.get('waypoints', [])
+            vid = str(vehicle_id).replace('vehicle_', '')
+            try:
+                vid = int(vid)
+            except:
+                pass
+            
+            for idx, waypoint in enumerate(waypoints, start=1):
+                location_id = waypoint.get('location_id') or waypoint.get('id')
+                if location_id:
+                    # 복합 키 사용: (vehicle_id, location_id)
+                    vehicle_location_to_order[(vid, location_id)] = idx
+                    print(f"  🔑 Mapping: V{vid}, Loc {location_id} → Order {idx}")
+        
+        print(f"\n🔄 Updating CSV rows...")
+        updates_count = 0
+        vehicle_changes = 0
+        order_changes = 0
+        
+        # DataFrame 업데이트: Stop_Order만 업데이트 (Vehicle_ID는 유지)
+        # 차량 간 이동은 별도 로직으로 처리해야 함
+        for idx, row in df.iterrows():
+            old_vehicle_id = row['Vehicle_ID']
+            location_id = row['Location_ID']
+            old_order = row['Stop_Order']
+            
+            # 같은 차량 내에서 순서만 업데이트
+            key = (old_vehicle_id, location_id)
+            if key in vehicle_location_to_order:
+                new_order = vehicle_location_to_order[key]
+                
+                if old_order != new_order:
+                    df.at[idx, 'Stop_Order'] = new_order
+                    order_changes += 1
+                    print(f"📝 Order changed: V{old_vehicle_id}, Loc {location_id}: {old_order} → {new_order}")
+                    updates_count += 1
+            else:
+                # 다른 차량으로 이동한 경우 찾기
+                for (other_vid, other_loc_id), new_order in vehicle_location_to_order.items():
+                    if other_loc_id == location_id and other_vid != old_vehicle_id:
+                        df.at[idx, 'Vehicle_ID'] = other_vid
+                        df.at[idx, 'Stop_Order'] = new_order
+                        vehicle_changes += 1
+                        order_changes += 1
+                        print(f"� Vehicle changed: Loc {location_id} from V{old_vehicle_id} to V{other_vid}, Order {new_order}")
+                        updates_count += 1
+                        break
+        
+        print(f"\n� Summary:")
+        print(f"  - Total updates: {updates_count}")
+        print(f"  - Vehicle changes: {vehicle_changes}")
+        print(f"  - Order changes: {order_changes}")
+        
+        # Vehicle_ID와 Stop_Order로 정렬
+        df = df.sort_values(by=['Vehicle_ID', 'Stop_Order'])
+        
+        # CSV 저장
+        df.to_csv(csv_path, index=False, encoding='utf-8-sig')
+        
+        print(f"✅ CSV saved: {csv_path}")
+        print(f"{'='*60}\n")
+        
+        return jsonify({
+            'success': True, 
+            'message': 'Timeline changes saved successfully',
+            'updated_count': updates_count,
+            'vehicle_changes': vehicle_changes,
+            'order_changes': order_changes,
+            'total_waypoints': len(vehicle_location_to_order)
+        })
+        
+    except Exception as e:
+        print(f"❌ Error saving timeline changes: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 # 프로젝트 목록 조회/생성 API
@@ -794,6 +988,41 @@ def download_demand_form():
         return send_from_directory(directory, 'demand_form.csv', as_attachment=True, download_name='demand_form.csv')
     except Exception as e:
         return jsonify({ 'error': f'Failed to download form: {str(e)}' }), 500
+
+@app.route('/download-routes')
+def download_routes():
+    """최적화된 경로 CSV 파일을 다운로드합니다."""
+    try:
+        pid = get_project_id()
+        csv_path = project_path('optimization_routes.csv', pid)
+        
+        if not os.path.exists(csv_path):
+            return jsonify({'error': 'optimization_routes.csv 파일이 없습니다. 먼저 최적화를 실행해주세요.'}), 404
+        
+        return send_file(csv_path, as_attachment=True, download_name=f'{pid}_routes.csv', mimetype='text/csv')
+    except Exception as e:
+        print(f"Error downloading routes CSV: {e}")
+        return jsonify({'error': f'Failed to download routes CSV: {str(e)}'}), 500
+
+@app.route('/download-edited-routes')
+def download_edited_routes():
+    """편집된 경로 CSV 파일을 다운로드합니다."""
+    try:
+        pid = get_project_id()
+        edit_id = request.args.get('editId', '')
+        
+        if not edit_id:
+            return jsonify({'error': 'editId 파라미터가 필요합니다.'}), 400
+        
+        csv_path = project_path('edited_routes.csv', pid, edit_id)
+        
+        if not os.path.exists(csv_path):
+            return jsonify({'error': f'edited_routes.csv 파일이 없습니다. (edit: {edit_id})'}), 404
+        
+        return send_file(csv_path, as_attachment=True, download_name=f'{pid}_{edit_id}_routes.csv', mimetype='text/csv')
+    except Exception as e:
+        print(f"Error downloading edited routes CSV: {e}")
+        return jsonify({'error': f'Failed to download edited routes CSV: {str(e)}'}), 500
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
@@ -1359,7 +1588,7 @@ def convert_routes_df_to_visualization_data(routes_df, pid: str | None = None):
 
 @app.route('/get-routes', methods=['GET'])
 def get_routes():
-    """스마트 경로 로딩: 캐시된 데이터가 있으면 바로 반환, 없으면 생성"""
+    """Smart route loading: return cached data if available, otherwise generate"""
     try:
         pid = get_project_id()
         edit_id = get_edit_id()  # editId 파라미터 추출
@@ -2530,6 +2759,125 @@ def regenerate_edited_routes():
         
     except Exception as e:
         print(f"❌ 경로 재생성 오류: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/update-stop-order', methods=['POST'])
+def update_stop_order():
+    """타임라인에서 변경된 정류장 순서를 edited_routes.csv에 저장합니다.
+    
+    Request JSON:
+    {
+        "routeOrder": {
+            "vehicle_id": [
+                {"name": "정류장명", "location": {...}, "demand": 숫자, "type": "customer" 또는 "depot"}
+            ]
+        }
+    }
+    """
+    try:
+        pid = get_project_id()
+        eid = get_edit_id()
+        
+        if not eid:
+            return jsonify({'success': False, 'error': 'editId가 필요합니다.'}), 400
+        
+        data = request.get_json()
+        if not data or 'routeOrder' not in data:
+            return jsonify({'success': False, 'error': '경로 순서 데이터가 필요합니다.'}), 400
+        
+        route_order = data.get('routeOrder', {})
+        
+        # edited_routes.csv 파일 경로
+        csv_path = project_path('edited_routes.csv', pid, eid)
+        
+        if not os.path.exists(csv_path):
+            return jsonify({'success': False, 'error': 'edited_routes.csv 파일을 찾을 수 없습니다.'}), 404
+        
+        # CSV 파일 로드
+        df = pd.read_csv(csv_path, encoding='utf-8-sig')
+        
+        print(f"🔄 타임라인 순서 업데이트 시작: {len(route_order)}개 차량")
+        
+        # 컬럼명 확인 (대소문자 구분 없이 처리)
+        columns_lower = {col.lower(): col for col in df.columns}
+        
+        # 필요한 컬럼 찾기
+        vehicle_col = None
+        for possible_name in ['vehicle_id', 'vehicle', 'vehicleid']:
+            if possible_name in columns_lower:
+                vehicle_col = columns_lower[possible_name]
+                break
+        
+        stop_order_col = None
+        for possible_name in ['stop_order', 'stoporder', 'order']:
+            if possible_name in columns_lower:
+                stop_order_col = columns_lower[possible_name]
+                break
+        
+        location_name_col = None
+        for possible_name in ['location_name', 'locationname', 'name']:
+            if possible_name in columns_lower:
+                location_name_col = columns_lower[possible_name]
+                break
+        
+        if not vehicle_col or not stop_order_col or not location_name_col:
+            return jsonify({'success': False, 'error': f'필요한 컬럼을 찾을 수 없습니다. 사용 가능한 컬럼: {list(df.columns)}'}), 400
+        
+        # 각 차량의 정류장 순서 업데이트
+        updated_count = 0
+        for vehicle_id_str, waypoints in route_order.items():
+            try:
+                # 차량 ID를 정수로 변환
+                vehicle_id = int(vehicle_id_str)
+                
+                # 해당 차량의 행 가져오기
+                vehicle_rows = df[df[vehicle_col] == vehicle_id].copy()
+                
+                if vehicle_rows.empty:
+                    print(f"⚠️  Vehicle {vehicle_id}를 찾을 수 없습니다.")
+                    continue
+                
+                # waypoints 순서대로 Stop_Order 업데이트
+                for new_order, waypoint in enumerate(waypoints, start=1):
+                    waypoint_name = waypoint.get('name', '')
+                    
+                    # 같은 차량에서 해당 정류장 찾기
+                    matching_rows = vehicle_rows[vehicle_rows[location_name_col] == waypoint_name]
+                    
+                    if matching_rows.empty:
+                        print(f"⚠️  Vehicle {vehicle_id}의 정류장 '{waypoint_name}'을(를) 찾을 수 없습니다.")
+                        continue
+                    
+                    # 전체 df에서 인덱스로 업데이트
+                    row_indices = df[(df[vehicle_col] == vehicle_id) & 
+                                    (df[location_name_col] == waypoint_name)].index
+                    
+                    for idx in row_indices:
+                        df.loc[idx, stop_order_col] = new_order
+                        updated_count += 1
+                
+                print(f"✅ Vehicle {vehicle_id}: {len(waypoints)}개 정류장 순서 업데이트 완료")
+                
+            except (ValueError, KeyError) as e:
+                print(f"❌ Vehicle {vehicle_id_str} 업데이트 오류: {e}")
+                continue
+        
+        # CSV 파일 저장
+        df.to_csv(csv_path, index=False, encoding='utf-8-sig')
+        
+        print(f"✅ 타임라인 순서 업데이트 완료: {updated_count}개 행 수정됨")
+        
+        return jsonify({
+            'success': True,
+            'message': f'정류장 순서가 업데이트되었습니다.',
+            'updatedCount': updated_count,
+            'vehicleCount': len(route_order)
+        })
+        
+    except Exception as e:
+        print(f"❌ 타임라인 순서 업데이트 오류: {e}")
         import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500

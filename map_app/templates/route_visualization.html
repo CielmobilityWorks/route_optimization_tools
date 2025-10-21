@@ -185,6 +185,7 @@
             <div class="subtitle">Generated on {{ current_time or 'N/A' }}</div>
         </div>
         <div class="header-actions">
+            <button class="btn btn-primary" onclick="downloadRoutesCSV()">Download Routes CSV</button>
             <button class="btn btn-secondary" onclick="saveAsHtml()">Save as HTML</button>
             <button class="btn btn-secondary" onclick="window.close()">Close</button>
         </div>
@@ -290,6 +291,14 @@
             a.click();
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
+        }
+
+        // CSV 다운로드 기능
+        function downloadRoutesCSV() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const projectId = urlParams.get('projectId') || 'default';
+            const downloadUrl = `/download-routes?projectId=${encodeURIComponent(projectId)}`;
+            window.location.href = downloadUrl;
         }
     </script>
 </body>

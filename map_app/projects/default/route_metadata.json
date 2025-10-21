@@ -1,12 +1,12 @@
 {
-  "last_generated": "2025-10-16T09:36:16.323188",
+  "last_generated": "2025-10-17T11:33:17.117206",
   "route_count": 6,
-  "total_distance_m": 152174.0,
-  "total_time_s": 40265.0,
+  "total_distance_m": 150475.0,
+  "total_time_s": 37924.0,
   "route_options": {
-    "searchOption": null,
-    "carType": null,
-    "viaTime": null,
-    "startTime": null
+    "searchOption": "0",
+    "carType": "1",
+    "viaTime": "60",
+    "startTime": "202510170900"
   }
 }
