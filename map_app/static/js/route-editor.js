@@ -1048,30 +1048,91 @@ function renderBottomRoutePanel(vehicleRoutes) {
         addTableRow(vehicleId, vehicleNumber, color, distText, timeText, loadText);
 
         // Add single range bar to show vehicle's total travel time (visualization only)
-        if (vehicleRoute.waypoints && Array.isArray(vehicleRoute.waypoints) && vehicleRoute.waypoints.length > 1) {
-            const startDate = new Date(2025, 0, 1, 9, 0, 0); // Start at 9:00 AM
-            
-            const firstWaypoint = vehicleRoute.waypoints[0];
-            const lastWaypoint = vehicleRoute.waypoints[vehicleRoute.waypoints.length - 1];
-            
-            const startTime = firstWaypoint.cumulative_time || 0;
-            const endTime = lastWaypoint.cumulative_time || 0;
-            
-            const rangeStart = new Date(startDate.getTime() + startTime * 1000);
-            const rangeEnd = new Date(startDate.getTime() + endTime * 1000);
-
-            // Add single range item for vehicle journey visualization
-            timelineItems.add({
-                id: `${vehicleId}_journey`,
-                group: vehicleId,
-                content: '',  // No label
-                start: rangeStart,
-                end: rangeEnd,
-                type: 'range',
-                className: 'vehicle-journey',
-                style: `background-color: ${color}; border-color: ${color}; border-width: 2px;`,  // Solid color matching border
-                editable: false  // Not editable
-            });
+        // Use start_point and end_point's arrival_time for accurate time range
+        if (vehicleRoute.start_point && vehicleRoute.end_point) {
+            try {
+                let rangeStart = null;
+                let rangeEnd = null;
+                
+                // Parse start_point arrival_time
+                if (vehicleRoute.start_point.arrival_time) {
+                    const startArrivalStr = vehicleRoute.start_point.arrival_time;
+                    let startTimeMatch;
+                    
+                    if (startArrivalStr.includes('T')) {
+                        // ISO format: "2025-10-17T09:22:17"
+                        startTimeMatch = startArrivalStr.split('T')[1];
+                    } else if (startArrivalStr.includes(' ')) {
+                        // Space separated: "2025-10-17 09:22:17"
+                        startTimeMatch = startArrivalStr.split(' ')[1];
+                    } else {
+                        // Already time only: "09:22:17"
+                        startTimeMatch = startArrivalStr;
+                    }
+                    
+                    const startTimeParts = startTimeMatch.split(':');
+                    const startHours = parseInt(startTimeParts[0], 10);
+                    const startMinutes = parseInt(startTimeParts[1], 10);
+                    const startSecondsParts = startTimeParts[2] ? startTimeParts[2].split('.') : ['0'];
+                    const startSeconds = parseInt(startSecondsParts[0], 10);
+                    
+                    const baseDate = new Date(2025, 0, 1); // January 1, 2025
+                    rangeStart = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate(), startHours, startMinutes, startSeconds);
+                } else if (vehicleRoute.start_point.cumulative_time != null) {
+                    // Fallback: Calculate from cumulative_time
+                    const startDate = new Date(2025, 0, 1, 9, 0, 0); // Start at 9:00 AM
+                    rangeStart = new Date(startDate.getTime() + vehicleRoute.start_point.cumulative_time * 1000);
+                }
+                
+                // Parse end_point arrival_time
+                if (vehicleRoute.end_point.arrival_time) {
+                    const endArrivalStr = vehicleRoute.end_point.arrival_time;
+                    let endTimeMatch;
+                    
+                    if (endArrivalStr.includes('T')) {
+                        // ISO format: "2025-10-17T09:22:17"
+                        endTimeMatch = endArrivalStr.split('T')[1];
+                    } else if (endArrivalStr.includes(' ')) {
+                        // Space separated: "2025-10-17 09:22:17"
+                        endTimeMatch = endArrivalStr.split(' ')[1];
+                    } else {
+                        // Already time only: "09:22:17"
+                        endTimeMatch = endArrivalStr;
+                    }
+                    
+                    const endTimeParts = endTimeMatch.split(':');
+                    const endHours = parseInt(endTimeParts[0], 10);
+                    const endMinutes = parseInt(endTimeParts[1], 10);
+                    const endSecondsParts = endTimeParts[2] ? endTimeParts[2].split('.') : ['0'];
+                    const endSeconds = parseInt(endSecondsParts[0], 10);
+                    
+                    const baseDate = new Date(2025, 0, 1); // January 1, 2025
+                    rangeEnd = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate(), endHours, endMinutes, endSeconds);
+                } else if (vehicleRoute.end_point.cumulative_time != null) {
+                    // Fallback: Calculate from cumulative_time
+                    const startDate = new Date(2025, 0, 1, 9, 0, 0); // Start at 9:00 AM
+                    rangeEnd = new Date(startDate.getTime() + vehicleRoute.end_point.cumulative_time * 1000);
+                }
+                
+                // Add range item if both start and end times are available
+                if (rangeStart && rangeEnd && rangeStart < rangeEnd) {
+                    timelineItems.add({
+                        id: `${vehicleId}_journey`,
+                        group: vehicleId,
+                        content: '',  // No label
+                        start: rangeStart,
+                        end: rangeEnd,
+                        type: 'range',
+                        className: 'vehicle-journey',
+                        style: `background-color: ${color}; border-color: ${color}; border-width: 2px;`,  // Solid color matching border
+                        editable: false  // Not editable
+                    });
+                } else {
+                    console.warn(`⚠️ Invalid range times for vehicle ${vehicleId}:`, {rangeStart, rangeEnd});
+                }
+            } catch (error) {
+                console.warn(`⚠️ Failed to create range bar for vehicle ${vehicleId}:`, error);
+            }
         }
         
         // Add circular markers for each waypoint's arrival_time
@@ -1090,43 +1151,60 @@ function renderBottomRoutePanel(vehicleRoutes) {
         
         // Create point markers for each waypoint
         allWaypoints.forEach((waypoint) => {
-            if (!waypoint.arrival_time) return;
+            // Calculate arrival date from cumulative_time if arrival_time is not present
+            let arrivalDate;
+            let arrivalTimeStr = waypoint.arrival_time;
             
             try {
-                // Parse arrival_time and extract time only (HH:MM:SS)
-                // Format: "2025-10-17T09:00:00"
-                const arrivalTimeStr = waypoint.arrival_time;
-                let timeMatch;
-                
-                // Extract time from ISO format or time-only format
-                if (arrivalTimeStr.includes('T')) {
-                    // ISO format: "2025-10-17T09:22:17"
-                    timeMatch = arrivalTimeStr.split('T')[1];
-                } else if (arrivalTimeStr.includes(' ')) {
-                    // Space separated: "2025-10-17 09:22:17"
-                    timeMatch = arrivalTimeStr.split(' ')[1];
+                if (arrivalTimeStr) {
+                    // Parse arrival_time if available
+                    let timeMatch;
+                    
+                    // Extract time from ISO format or time-only format
+                    if (arrivalTimeStr.includes('T')) {
+                        // ISO format: "2025-10-17T09:22:17"
+                        timeMatch = arrivalTimeStr.split('T')[1];
+                    } else if (arrivalTimeStr.includes(' ')) {
+                        // Space separated: "2025-10-17 09:22:17"
+                        timeMatch = arrivalTimeStr.split(' ')[1];
+                    } else {
+                        // Assume it's already time only: "09:22:17"
+                        timeMatch = arrivalTimeStr;
+                    }
+                    
+                    // Parse HH:MM:SS or HH:MM:SS.ffffff
+                    const timeParts = timeMatch.split(':');
+                    const hours = parseInt(timeParts[0], 10);
+                    const minutes = parseInt(timeParts[1], 10);
+                    const secondsParts = timeParts[2] ? timeParts[2].split('.') : ['0'];
+                    const seconds = parseInt(secondsParts[0], 10);
+                    
+                    // Create date with base date (2025-01-01) and parsed time
+                    const baseDate = new Date(2025, 0, 1); // January 1, 2025
+                    arrivalDate = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate(), hours, minutes, seconds);
+                } else if (waypoint.cumulative_time != null) {
+                    // Fallback: Calculate from cumulative_time (in seconds)
+                    // Assume start time is 9:00 AM
+                    const startDate = new Date(2025, 0, 1, 9, 0, 0); // Start at 9:00 AM
+                    arrivalDate = new Date(startDate.getTime() + waypoint.cumulative_time * 1000);
+                    
+                    // Generate arrival_time string for tooltip
+                    const hours = String(arrivalDate.getHours()).padStart(2, '0');
+                    const minutes = String(arrivalDate.getMinutes()).padStart(2, '0');
+                    const seconds = String(arrivalDate.getSeconds()).padStart(2, '0');
+                    arrivalTimeStr = `${hours}:${minutes}:${seconds}`;
                 } else {
-                    // Assume it's already time only: "09:22:17"
-                    timeMatch = arrivalTimeStr;
+                    // No time information available, skip this waypoint
+                    console.warn('⚠️ Waypoint has no arrival_time or cumulative_time:', waypoint);
+                    return;
                 }
-                
-                // Parse HH:MM:SS or HH:MM:SS.ffffff
-                const timeParts = timeMatch.split(':');
-                const hours = parseInt(timeParts[0], 10);
-                const minutes = parseInt(timeParts[1], 10);
-                const secondsParts = timeParts[2] ? timeParts[2].split('.') : ['0'];
-                const seconds = parseInt(secondsParts[0], 10);
-                
-                // Create date with base date (2025-01-01) and parsed time
-                const baseDate = new Date(2025, 0, 1); // January 1, 2025
-                const arrivalDate = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate(), hours, minutes, seconds);
                 
                 const isDepot = waypoint.type === 'depot' || waypoint.name?.includes('Depot') || waypoint.name?.includes('depot');
                 const isStartEnd = waypoint.isStart || waypoint.isEnd;
                 const isEditable = !isDepot && !isStartEnd;
                 
                 // Create tooltip with arrival_time string
-                const tooltipContent = createTooltipContent(waypoint, waypoint.arrival_time);
+                const tooltipContent = createTooltipContent(waypoint, arrivalTimeStr);
                 
                 // Create point marker item
                 timelineItems.add({
@@ -1155,7 +1233,7 @@ function renderBottomRoutePanel(vehicleRoutes) {
                     }
                 });
             } catch (error) {
-                console.warn(`⚠️ Failed to parse arrival_time for waypoint:`, waypoint.arrival_time, error);
+                console.warn(`⚠️ Failed to create timeline marker for waypoint:`, waypoint, error);
             }
         });
 
